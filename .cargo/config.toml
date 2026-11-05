@@ -1,0 +1,22 @@
+# `--cfg near` is what makes near-sdk talk to the NEAR host functions.
+#
+# near-sdk 5.30 moved the low-level environment calls into `near-sdk-env`, where each one is
+# wrapped in `execute_target_specific!`. That macro picks the host implementation only under
+# `all(near, target_arch = "wasm32")`, and falls back to a pure-Rust "local" implementation
+# otherwise. Nothing sets `cfg(near)` by itself: `cargo near build` passes it, and a plain
+# `cargo build --target wasm32-unknown-unknown` does not.
+#
+# Without it, `env::panic_str` compiles to `eprintln!` followed by a bare `panic!()`. The
+# release profile sets `panic = "abort"`, so that becomes a wasm `unreachable` trap and the
+# message is gone: every `require!` in the contract surfaces on chain as
+# `ExecutionError("WebAssembly trap: An `unreachable` opcode was executed.")` with no reason
+# attached. The rules sandbox tests found this — they could tell that a rejection happened
+# but not which check had rejected it, and the demo page could not have shown a reason
+# either. With the flag, the same rejection arrives as
+# `HostError(GuestPanic { panic_msg: "only the admin may change rules" })`.
+#
+# It is set here rather than in a script so that `cargo test`, `cargo build` and
+# `scripts/deploy.sh` all produce the same wasm. For host targets the cfg changes nothing —
+# the macro also requires `target_arch = "wasm32"` — so unit tests are unaffected.
+[build]
+rustflags = ["--cfg", "near"]
