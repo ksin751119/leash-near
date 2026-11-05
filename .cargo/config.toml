@@ -15,8 +15,20 @@
 # either. With the flag, the same rejection arrives as
 # `HostError(GuestPanic { panic_msg: "only the admin may change rules" })`.
 #
-# It is set here rather than in a script so that `cargo test`, `cargo build` and
-# `scripts/deploy.sh` all produce the same wasm. For host targets the cfg changes nothing —
-# the macro also requires `target_arch = "wasm32"` — so unit tests are unaffected.
-[build]
+# Scoped to the wasm target, not `[build]`. near-sdk-env has a `compile_error!` for
+# `cfg(near)` without `target_arch = "wasm32"`, so passing it to a host build is never right.
+# (A host build of the contract lib is independently refused by near-sdk unless its
+# `unit-testing` or `non-contract-usage` feature is on, which is why `cargo check -p
+# leash-contract` does not work in this project while `cargo test` does — the dev-dependency
+# enables the feature. That is near-sdk's rule, not this flag's doing.) Under `[target.…]`
+# the flag reaches exactly the build that needs it and nothing else.
+#
+# This file is a fallback, not the guarantee. Cargo ignores `rustflags` here entirely whenever
+# the `RUSTFLAGS` environment variable is set, even to the empty string, and config discovery
+# is relative to the working directory. The two builds that produce a wasm anyone runs —
+# `scripts/build-contract.sh`, which `scripts/deploy.sh` calls, and `build_wasm` in the
+# sandbox tests — therefore set the flag themselves, appending to whatever `RUSTFLAGS` already
+# holds. `the_contract_wasm_talks_to_the_host_panic_function` fails if a built wasm ever
+# misses it.
+[target.wasm32-unknown-unknown]
 rustflags = ["--cfg", "near"]

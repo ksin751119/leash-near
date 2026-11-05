@@ -13,11 +13,27 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
 }
 
+/// The host function `env::panic_str` calls when the wasm is built with `--cfg near`. Its
+/// presence in the import section is how a build proves it carries the flag; see
+/// `.cargo/config.toml` and `scripts/build-contract.sh`.
+pub const HOST_PANIC_IMPORT: &[u8] = b"panic_utf8";
+
 /// Build a workspace member to wasm32 (release) and return its bytes.
+///
+/// Sets `--cfg near` itself rather than relying on `.cargo/config.toml`, because cargo
+/// ignores config `rustflags` entirely whenever the `RUSTFLAGS` environment variable is set,
+/// even to the empty string — and a wasm built without the flag silently discards every panic
+/// message, which would turn a dozen assertions in `rules.rs` about *why* a call was refused
+/// into assertions that something, anything, went wrong.
 pub fn build_wasm(package: &str) -> anyhow::Result<Vec<u8>> {
     let root = repo_root();
+    let rustflags = match std::env::var("RUSTFLAGS") {
+        Ok(existing) => format!("{existing} --cfg near"),
+        Err(_) => "--cfg near".to_string(),
+    };
     let status = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
         .current_dir(&root)
+        .env("RUSTFLAGS", rustflags)
         .args(["build", "--release", "--target", "wasm32-unknown-unknown", "-p", package])
         .status()?;
     anyhow::ensure!(status.success(), "building {package} to wasm failed");
@@ -241,9 +257,14 @@ impl Passkey {
 // The challenge, reproduced from the documented byte layout
 // ---------------------------------------------------------------------------------------
 
-/// The action tag every rule change is signed under. Mirrors `ACTION_SET_RULE` in
-/// `contract/src/challenge.rs`.
+/// The action tags, mirroring `contract/src/challenge.rs`. Written out here rather than
+/// imported so that renaming one in the contract shows up as a test failure.
+///
+/// `set_rule` and `add_payee` sign over the same payload under different tags, because
+/// `set_rule` resets the spend ledger and `add_payee` does not.
 pub const ACTION_SET_RULE: &str = "leash:set_rule:v1";
+pub const ACTION_ADD_PAYEE: &str = "leash:add_payee:v1";
+pub const ACTION_UNPAUSE: &str = "leash:unpause:v1";
 
 /// `sha256(len(action) ‖ action ‖ len(payload) ‖ payload ‖ nonce ‖ len(contract) ‖ contract)`,
 /// written out here independently of the contract. Lengths are `u32` little-endian, the

@@ -33,6 +33,23 @@
 //! different inputs can produce the same byte string. (Dropping the lengths would not be
 //! safe — `"ab" ‖ "c"` and `"a" ‖ "bc"` are the same bytes.)
 //!
+//! # The three actions
+//!
+//! | Action | Tag | Payload | What it authorises |
+//! | --- | --- | --- | --- |
+//! | set a rule | [`ACTION_SET_RULE`] | `u32le(len(node)) ‖ node ‖ borsh(rule)` | `set_rule`, which **resets the spend ledger** |
+//! | add a payee | [`ACTION_ADD_PAYEE`] | the same | `add_payee`, which **leaves the ledger alone** |
+//! | unpause the account | [`ACTION_UNPAUSE`] | empty | `set_paused(false)` |
+//!
+//! `set_rule` and `add_payee` sign over the same payload but under **different tags**, and
+//! that separation is load-bearing. An earlier version shared one tag, on the reasoning that
+//! both methods reach the same state so an assertion for one may as well authorise the other.
+//! That reasoning stopped being true the moment an accepted widening started resetting the
+//! spend ledger: `set_rule` now hands the node a fresh period budget and `add_payee` does
+//! not, so a shared tag would let an assertion signed to add one payee be redirected into a
+//! `set_rule` that also wipes the ledger — a loosening the signer never saw.
+//! `an_add_payee_assertion_cannot_set_a_rule` pins it.
+//!
 //! For a rule change, `action` is [`ACTION_SET_RULE`] and `payload` is:
 //!
 //! ```text
@@ -62,29 +79,51 @@
 //! paused:           1 byte, 0 or 1
 //! ```
 //!
+//! # Adding an action later
+//!
+//! Two rules, both load-bearing:
+//!
+//! 1. **A new action gets a new tag.** Never reuse a tag for an operation with a different
+//!    effect; that is how a signature gets redirected. The tag is length-prefixed and hashed
+//!    in a fixed position, so no tag can absorb the head of a payload or shadow another.
+//! 2. **If a payload appends anything after `borsh(rule)`, length-prefix the rule first.**
+//!    `set_rule_payload` leaves the Borsh trailing and unprefixed, which is injective only
+//!    because it is the final field of a payload that is itself length-prefixed, and because
+//!    `Rule`'s encoding is self-delimiting for a known type. Append a field after it without a
+//!    prefix and that argument collapses.
+//!
 //! # For the demo page
 //!
-//! Do not reimplement any of the above unless you want to. `challenge_for(node, rule,
-//! credential_id)` is a view method that returns these exact 32 bytes, base64-encoded, with
-//! the nonce read from state. `tools/capture-assertion.html` and the demo page both call it,
-//! and `challenge_for_matches_the_documented_layout` in the sandbox tests checks it against
-//! an independent implementation of this layout, so the two cannot drift apart silently.
+//! Do not reimplement any of the above unless you want to. Three view methods return these
+//! exact 32 bytes, base64-encoded, with the nonce read from state:
 //!
-//! # One action for both gated methods
+//! - `challenge_for(node, rule, credential_id)` — for `set_rule`
+//! - `challenge_for_add_payee(node, payee, credential_id)` — for `add_payee`; it derives the
+//!   resulting rule from stored state, so a client cannot get that part wrong
+//! - `challenge_for_unpause(credential_id)` — for `set_paused(false)`
 //!
-//! `add_payee` signs under [`ACTION_SET_RULE`] as well, over the rule that results from
-//! adding the payee. So an assertion signed for `set_rule(node, R)` would also authorise an
-//! `add_payee` that produces exactly `R`, and vice versa. That is deliberate: the two reach
-//! the same state, and the nonce is consumed either way, so there is nothing to gain. One
-//! layout is one thing for the client to get right.
+//! `tools/capture-assertion.html` and the demo page both call these, and
+//! `challenge_for_matches_the_documented_layout` in the sandbox tests checks the first
+//! against an independent implementation of this layout, so the two cannot drift apart
+//! silently.
 
 use crate::rule::Rule;
 use near_sdk::AccountId;
 use sha2::{Digest, Sha256};
 
-/// The action tag for a rule change. Versioned, so a future layout change cannot be
-/// mistaken for this one by a client that was not updated.
+/// Action tag for `set_rule`. Versioned, so a future layout change cannot be mistaken for
+/// this one by a client that was not updated.
+///
+/// Distinct from [`ACTION_ADD_PAYEE`] because `set_rule` resets the spend ledger and
+/// `add_payee` does not. See the module doc comment.
 pub const ACTION_SET_RULE: &str = "leash:set_rule:v1";
+
+/// Action tag for `add_payee`. Same payload as [`ACTION_SET_RULE`], different effect.
+pub const ACTION_ADD_PAYEE: &str = "leash:add_payee:v1";
+
+/// Action tag for `set_paused(false)`. The payload is empty: unpausing is account-wide, so
+/// there is no node and no rule to bind — the nonce and the contract id are the whole of it.
+pub const ACTION_UNPAUSE: &str = "leash:unpause:v1";
 
 /// `u32le(len) ‖ bytes`.
 fn push_len_prefixed(out: &mut Vec<u8>, bytes: &[u8]) {
@@ -103,8 +142,10 @@ pub fn set_rule_payload(node: &AccountId, rule: &Rule) -> Vec<u8> {
     let rule_bytes = near_sdk::borsh::to_vec(rule).expect("a Rule always Borsh-serialises");
     let mut payload = Vec::with_capacity(4 + node.len() + rule_bytes.len());
     push_len_prefixed(&mut payload, node.as_bytes());
-    // Not length-prefixed: Borsh is self-delimiting and this is the last field, so the
-    // concatenation stays injective without one.
+    // Deliberately NOT length-prefixed, and it must stay the last field for that to be safe:
+    // Borsh is self-delimiting for a known type, and the payload as a whole is prefixed by
+    // `gate_challenge`. Anything appended after this needs its own prefix — see the module
+    // doc comment, "Adding an action later".
     payload.extend_from_slice(&rule_bytes);
     payload
 }
@@ -203,6 +244,36 @@ mod tests {
         let a = rule("usdc.testnet", 1_000, &["b.testnet", "a.testnet"]);
         let b = rule("usdc.testnet", 1_000, &["a.testnet", "b.testnet", "a.testnet"]);
         assert_eq!(challenge("ops.leash.testnet", &a, 0, C), challenge("ops.leash.testnet", &b, 0, C));
+    }
+
+    /// The three tags must never produce the same challenge for the same nonce, or an
+    /// assertion signed for one operation would authorise another with a different effect.
+    /// This is the unit-level half of `an_add_payee_assertion_cannot_set_a_rule`.
+    #[test]
+    fn the_three_actions_give_three_different_challenges() {
+        let r = rule("usdc.testnet", 1_000, &["alice.testnet"]);
+        let p = set_rule_payload(&acct("ops.leash.testnet"), &r);
+        let c = acct(C);
+        let set_rule = gate_challenge(ACTION_SET_RULE, &p, 0, &c);
+        let add_payee = gate_challenge(ACTION_ADD_PAYEE, &p, 0, &c);
+        let unpause = gate_challenge(ACTION_UNPAUSE, &[], 0, &c);
+        assert_ne!(set_rule, add_payee, "set_rule and add_payee must not share a challenge");
+        assert_ne!(set_rule, unpause);
+        assert_ne!(add_payee, unpause);
+    }
+
+    /// The tags are distinct strings and none is a prefix of another, so even without the
+    /// length prefix no tag could shadow another. Both belts, checked.
+    #[test]
+    fn no_action_tag_is_a_prefix_of_another() {
+        let tags = [ACTION_SET_RULE, ACTION_ADD_PAYEE, ACTION_UNPAUSE];
+        for (i, a) in tags.iter().enumerate() {
+            for (j, b) in tags.iter().enumerate() {
+                if i != j {
+                    assert!(!a.starts_with(b), "{a} starts with {b}");
+                }
+            }
+        }
     }
 
     /// Length prefixes exist so no two different inputs can share a byte string. Without the

@@ -294,7 +294,13 @@ Expected: FAIL — methods not found.
 
 - [ ] **Step 3: Implement the methods**
 
-`set_rule` requires `predecessor_id == admin`; computes `classify`; when `Widening`, requires an assertion whose challenge binds the action, the node, the normalised rule, `cred.nonce` and `env::current_account_id()` (layout in `contract/src/challenge.rs` — the plan's original `sha256(borsh(proposed_rule) ‖ cred.nonce)` bound too little, see the spec's passkey section), and increments the nonce on success; bumps `epoch` on every accepted change. A node with no rule yet counts as `Widening`.
+`set_rule` requires `predecessor_id == admin`; computes `classify`; when `Widening`, requires an assertion whose challenge binds the action, the node, the normalised rule, `cred.nonce` and `env::current_account_id()` (layout in `contract/src/challenge.rs` — the plan's original `sha256(borsh(proposed_rule) ‖ cred.nonce)` bound too little, see the spec's passkey section), and increments the nonce on success. A node with no rule yet counts as `Widening`.
+
+`epoch` and the spend ledger are reset **only** by an accepted `Widening` — not by every accepted change, as this plan first said. A tightening is ungated, so resetting the ledger there let ADMIN refill a node's budget for free by re-applying the identical rule; and a derived `now_ms / period_ms` bucket let a tightening that merely lengthened the period do the same. The ledger is an explicit `{ window_began_ms, spent }` accumulator per node. See the spec's "Shared budget" section for the full correction.
+
+Both `set_rule` and `add_payee` register any payee they introduce on the token before committing, so "on the allow-list" always means "can be paid"; a tightening introduces no payee and stays synchronous. `set_rule` therefore returns `PromiseOrValue<bool>` rather than `()`.
+
+Also in this task, ruled during review: `remove_credential` (ADMIN-only, ungated, tombstoned so an id cannot be re-registered), and `set_paused(paused, assertion)` for the account-wide switch (`true` ungated, `false` gated under its own action tag).
 
 - [ ] **Step 4: Run to verify they pass**
 

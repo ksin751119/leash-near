@@ -1,6 +1,9 @@
 use near_sdk::{near, AccountId};
 
-mod u128_dec {
+/// `u128` as a decimal string in JSON. JavaScript numbers lose precision above 2^53, so
+/// every balance this contract puts on the wire is a string — the same convention NEP-141
+/// uses.
+pub(crate) mod u128_dec {
     use near_sdk::serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(v: &u128, s: S) -> Result<S::Ok, S::Error> {

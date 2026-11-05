@@ -11,8 +11,11 @@ TOKEN=${3:?token contract id}
 NETWORK=${4:-testnet}
 
 cd "$(dirname "$0")/.."
-cargo build --release --target wasm32-unknown-unknown -p leash-contract
-WASM=target/wasm32-unknown-unknown/release/leash_contract.wasm
+# Not a bare `cargo build`: the wasm has to carry `--cfg near` or the deployed contract
+# throws away every refusal reason, and `.cargo/config.toml` alone does not survive a
+# RUSTFLAGS in the environment. build-contract.sh sets the flag itself and refuses to return
+# a wasm that does not carry it.
+WASM=$(scripts/build-contract.sh leash-contract)
 
 near contract deploy "$WALLET" use-file "$WASM" \
   with-init-call new json-args "{\"admin\":\"$ADMIN\",\"token\":\"$TOKEN\"}" \

@@ -130,30 +130,75 @@ dedicated sandbox tests, including two agents spending concurrently in the same 
 
 ### Payee registration
 
-NEP-141 `ft_transfer` fails if the receiver has no storage deposit on the token contract.
-Adding a payee to the allow-list therefore also checks/pays `storage_deposit` for it. Without
+NEP-141 `ft_transfer` fails if the receiver has no storage deposit on the token contract. So the
+invariant is **"on the allow-list" means "can be paid"**: every path that writes a payee pays
+`storage_deposit` for it first and commits the rule only in the callback, all-or-nothing. Without
 this, a legitimate payment fails for a reason unrelated to policy and the demo looks broken.
+
+Both paths, not just one. `add_payee` and `set_rule` are equally able to introduce a payee —
+`set_rule` can introduce several at once — and Task 5's first implementation enforced the
+invariant in `add_payee` only, which left every rule set through `set_rule` carrying payees that
+could not receive a transfer. A tightening can never introduce a payee (any addition is a
+loosening by `classify`), so the emergency brake still applies synchronously.
+
+Pinned by `every_payee_on_the_list_is_registered_whichever_path_added_it`,
+`a_rule_whose_payee_cannot_be_registered_is_not_applied`,
+`a_failed_storage_deposit_leaves_the_payee_off_the_list` and
+`a_tightening_does_not_wait_on_the_token`.
 
 ---
 
 ## Shared budget
 
 ```
-spent: Map<(node, epoch, period), Balance>      // no agent in the key
+NodeRecord { rule, epoch, version, window_began_ms, spent }   // one per node, no agent in it
 ```
 
-`period = now_ms / period_ms`, where `now_ms` is `env::block_timestamp_ms()` and `period_ms` is
-the rule's period. The period rolls over on its own with no transaction from anyone; `epoch` is
-advanced only by `set_rule`, so changing a rule starts a fresh ledger rather than retroactively
-freeing or consuming headroom.
+The budget ledger is an **explicit accumulator**, not a figure derived from the clock:
 
-**Corrected in Task 5:** this was originally written as a single packed `u64`,
-`period_bucket = (epoch << 32) | (now_ms / period_ms)`. That packing is unsafe. `now_ms` is about
-1.7e12, so any `period_ms` below roughly 400 makes the quotient exceed `u32::MAX` and carry into
-the epoch bits, silently moving a node onto a different epoch's ledger. `period_ms` is
-caller-supplied and only has to be non-zero, so that is reachable. The composite key has the same
-semantics with no overflow to reason about; `state::tests::a_tiny_period_does_not_collide_with_
-another_epoch` pins it.
+```
+on each spend:
+    if now_ms >= window_began_ms + period_ms:
+        window_began_ms += period_ms * ((now_ms - window_began_ms) / period_ms)
+        spent = 0
+    spent += amount
+```
+
+The window advances by whole multiples of `period_ms`, so windows stay anchored to the first one
+and do not drift forward with traffic. It rolls on its own with no transaction from anyone.
+
+**Only an accepted loosening resets the ledger** — `spent = 0`, `window_began_ms = now` — and
+that also advances `epoch`. A loosening is gated on a passkey, so a reset always costs a
+signature. Tightenings and payee changes leave the ledger exactly where it is.
+
+**Corrected twice in Task 5, both times after review.** The design originally said
+`period_bucket = (epoch << 32) | (now_ms / period_ms)` with the epoch advanced by every
+`set_rule`. Three things were wrong with it, and the first two were security holes — each one let
+ADMIN refill a node's budget with no passkey at all, which would make `period_limit` not a limit
+and "loosening needs a human" not true:
+
+1. **Every accepted `set_rule` advanced the epoch, including a tightening.** Tightening is
+   ungated by design, and re-applying the byte-identical rule classifies as a tightening, so the
+   ledger could be reset on demand, unlimited times, for free. Fixed by advancing the epoch only
+   on an accepted widening.
+2. **The bucket was `now_ms / period_ms`.** Fixing the epoch alone is not enough: *lengthening*
+   `period_ms` is a tightening by `classify`, and it changes the divisor, so the next read lands
+   on a different key and shows zero. Fixed by recording the window start instead of dividing —
+   changing `period_ms` now changes only when the next roll happens.
+3. **The packed form overflowed.** `now_ms` is about 1.7e12, so any `period_ms` below roughly 400
+   made the quotient exceed `u32::MAX` and carry into the epoch bits, landing on another epoch's
+   ledger. `period_ms` is caller-supplied and only has to be non-zero, so it was reachable.
+
+A fourth, non-security problem went with them: the map form needed an entry per
+`(node, epoch, period)` and nothing ever reclaimed them, so the contract staked them forever.
+One accumulator per node has no such growth.
+
+Pinned by `state::tests::a_widening_resets_the_ledger_and_bumps_the_epoch`,
+`a_tightening_does_not_reset_the_ledger_or_bump_the_epoch`,
+`re_applying_the_same_rule_many_times_frees_nothing`,
+`lengthening_the_period_in_a_tightening_frees_nothing`,
+`the_window_advances_by_whole_periods_and_does_not_drift` and
+`a_one_millisecond_period_rolls_correctly`.
 
 Consequences, both intended:
 
@@ -183,6 +228,20 @@ Any widening field ⇒ the whole call needs a valid passkey assertion. Pure tigh
 and immediate, callable by ADMIN alone. **Tightening must never be gated**: the moment you
 notice something wrong is the moment you must be able to clamp down, and a gate there is a
 gate on the emergency brake.
+
+The same asymmetry applies to the two things outside `Rule` that take capability away or hand
+it back:
+
+- **The account-wide pause.** `set_paused(true)` is ADMIN-only and ungated; `set_paused(false)`
+  needs an assertion, signed under its own action tag. Refusal code 2 means paused-by-account
+  **or** paused-by-rule.
+- **Credential registration and removal.** `register_credential` is ADMIN-only (it is the trust
+  boundary — see below); `remove_credential` is ADMIN-only and ungated, because removing a
+  credential only takes capability away. Removal has to exist: without it the cap on
+  credentials would be a *lifetime* budget on an account whose code cannot be redeployed, and
+  after enough rotations no loosening would ever be possible again. A removed credential is
+  kept as a tombstone rather than deleted, so its id can never be re-registered at nonce 0 and
+  re-arm old assertions, while the slot it held is free for a new credential.
 
 The comparator is pure, total, and unit-tested per field — it is the security boundary of the
 whole design, so it is written as data (a list of field comparators), not as a long `if`.
@@ -217,6 +276,15 @@ contract:
    The rule that is hashed is always one the contract parsed from JSON and re-serialised itself,
    never bytes the caller supplied: `Rule`'s derived `BorshDeserialize` does not re-sort or dedupe
    `payees`, so two different byte strings can mean the same rule.
+
+   **Each gated operation signs under its own action tag**, and the separation is load-bearing:
+   `set_rule` (which resets the spend ledger), `add_payee` (which does not) and
+   `set_paused(false)`. An interim version let `set_rule` and `add_payee` share a tag, on the
+   reasoning that both reach the same state — which stopped being true the moment a loosening
+   started resetting the ledger, because a shared tag would then let an assertion signed to add
+   one payee be redirected into a rule change that also wipes the ledger. Pinned by
+   `an_add_payee_assertion_cannot_set_a_rule`, `a_set_rule_assertion_cannot_add_a_payee` and
+   `an_unpause_assertion_cannot_widen_a_rule`.
 3. Verifies ECDSA-P256 over `authenticator_data ‖ sha256(client_data_json)` against the stored
    public key, using the `p256` crate compiled to wasm32.
 4. Increments the nonce.

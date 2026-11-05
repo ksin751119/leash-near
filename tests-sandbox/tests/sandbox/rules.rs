@@ -12,8 +12,8 @@
 mod common;
 
 use common::{
-    deploy_with_token, gate_challenge, set_rule_payload, why, AssertionJson, Fixture, Passkey,
-    ACTION_SET_RULE, FLAG_UP,
+    build_wasm, deploy_with_token, gate_challenge, set_rule_payload, why, AssertionJson, Fixture,
+    Passkey, ACTION_ADD_PAYEE, ACTION_SET_RULE, ACTION_UNPAUSE, FLAG_UP, HOST_PANIC_IMPORT,
 };
 use leash_contract::rule::Rule;
 use near_sdk::base64::{engine::general_purpose::STANDARD, Engine};
@@ -100,21 +100,30 @@ async fn nonce_of(fx: &Fixture, pk: &Passkey) -> anyhow::Result<u64> {
     n.ok_or_else(|| anyhow::anyhow!("credential is not registered"))
 }
 
-/// Sign `rule` for `node` at the credential's current nonce.
+/// Sign `payload` under `action` at the credential's current nonce.
+async fn sign(
+    fx: &Fixture,
+    pk: &Passkey,
+    action: &str,
+    payload: &[u8],
+) -> anyhow::Result<AssertionJson> {
+    let nonce = nonce_of(fx, pk).await?;
+    Ok(pk.assert_over(&gate_challenge(
+        action,
+        payload,
+        nonce,
+        fx.wallet.id().as_str(),
+    )))
+}
+
+/// Sign `rule` for `node` as a `set_rule`.
 async fn sign_rule(
     fx: &Fixture,
     pk: &Passkey,
     node: &str,
     rule: &Rule,
 ) -> anyhow::Result<AssertionJson> {
-    let nonce = nonce_of(fx, pk).await?;
-    let challenge = gate_challenge(
-        ACTION_SET_RULE,
-        &set_rule_payload(node, rule),
-        nonce,
-        fx.wallet.id().as_str(),
-    );
-    Ok(pk.assert_over(&challenge))
+    sign(fx, pk, ACTION_SET_RULE, &set_rule_payload(node, rule)).await
 }
 
 async fn set_rule(
@@ -175,6 +184,26 @@ async fn spent_in_period(fx: &Fixture, node: &str) -> anyhow::Result<String> {
         .args_json(json!({ "node": node }))
         .await?
         .json()?)
+}
+
+async fn window_began_ms(fx: &Fixture, node: &str) -> anyhow::Result<Option<u64>> {
+    Ok(fx
+        .wallet
+        .view("window_began_ms")
+        .args_json(json!({ "node": node }))
+        .await?
+        .json()?)
+}
+
+/// `storage_balance_of` on the token: `Some` iff the account can receive an `ft_transfer`.
+async fn is_registered_on_token(fx: &Fixture, account: &str) -> anyhow::Result<bool> {
+    let bal: Option<serde_json::Value> = fx
+        .token
+        .view("storage_balance_of")
+        .args_json(json!({ "account_id": account }))
+        .await?
+        .json()?;
+    Ok(bal.is_some())
 }
 
 /// A fixture with a credential registered and `NODE` already carrying `base_rule`.
@@ -348,7 +377,7 @@ async fn an_unregistered_credential_cannot_widen() -> anyhow::Result<()> {
     let res = set_rule(&fx, &fx.admin, NODE, &wider, Some(stranger.assert_over(&challenge))).await?;
     assert!(res.is_failure(), "an unregistered key widened a rule: {res:#?}");
     let msg = why(res);
-    assert!(msg.contains("no such registered credential"), "refused, but not for being unregistered: {msg}");
+    assert!(msg.contains("no such active credential"), "refused, but not for being unregistered: {msg}");
     Ok(())
 }
 
@@ -512,48 +541,118 @@ async fn a_credential_cannot_be_re_registered() -> anyhow::Result<()> {
         .await?;
     assert!(res.is_failure(), "a credential id was re-registered: {res:#?}");
     let msg = why(res);
-    assert!(msg.contains("already registered"), "refused, but not for being a duplicate id: {msg}");
+    assert!(msg.contains("already known"), "refused, but not for being a duplicate id: {msg}");
     Ok(())
 }
 
 // ---------------------------------------------------------------------------------------
 // The epoch and the ledger
 // ---------------------------------------------------------------------------------------
+//
+// The next two tests sit side by side on purpose, and the asymmetry between them is the
+// whole point: resetting a node's budget hands a full period's headroom back, which is a
+// loosening, so only the gated path may do it.
+//
+// An earlier version reset the ledger on every accepted `set_rule`. Tightening is ungated by
+// design, and re-applying the byte-identical rule classifies as a tightening — so ADMIN
+// could refill a node's budget with no passkey, as often as it liked, and `period_limit`
+// stopped being a limit. See `contract/src/state.rs`.
+//
+// Nothing can put a non-zero figure into the ledger until `spend` lands in Task 6, so these
+// check the epoch and the window, and the figures themselves are pinned in-process by
+// `state::tests::a_widening_resets_the_ledger_and_bumps_the_epoch` and
+// `..._a_tightening_does_not_reset_the_ledger_or_bump_the_epoch`, which write to the ledger
+// directly.
 
-/// The epoch lives in the per-node record, not in `Rule`, and `set_rule` advances it. It is
-/// part of the spent ledger's key, so advancing it starts a fresh ledger rather than
-/// retroactively freeing or consuming headroom.
-///
-/// Nothing can put a non-zero figure into the ledger until `spend` lands in Task 6, so the
-/// ledger half of this is checked in-process by `state::tests::setting_a_rule_zeroes_the_
-/// spent_ledger`, which writes to it directly. What this test pins is the epoch bump and
-/// that the view reads zero off a fresh epoch.
+/// A human signed for it, so the budget starts fresh. One sentence for the demo: new rule,
+/// new budget.
 #[tokio::test]
-async fn setting_a_rule_bumps_the_epoch_and_zeroes_the_ledger() -> anyhow::Result<()> {
+async fn a_widening_bumps_the_epoch_and_zeroes_the_ledger() -> anyhow::Result<()> {
     let fx = deploy_with_token().await?;
     let pk = Passkey::new("admin phone");
     register(&fx, &pk).await?;
     let token = fx.token.id().to_string();
 
     assert_eq!(epoch_of(&fx, NODE).await?, None, "an unconfigured node has no epoch");
+    assert_eq!(window_began_ms(&fx, NODE).await?, None, "and no window");
 
     set_rule_signed(&fx, &pk, NODE, &base_rule(&token)).await?;
     assert_eq!(epoch_of(&fx, NODE).await?, Some(0), "the first rule starts at epoch 0");
+    let first_window = window_began_ms(&fx, NODE).await?.expect("a window opened");
     assert_eq!(spent_in_period(&fx, NODE).await?, "0");
+
+    // Raising per_tx_limit: a loosening, so it needs an assertion and resets the ledger.
+    let wider = rule(&token, 5_000, 10_000, 86_400_000, 0, u64::MAX, &["alice.testnet"], false);
+    set_rule_signed(&fx, &pk, NODE, &wider).await?;
+    assert_eq!(epoch_of(&fx, NODE).await?, Some(1), "an accepted widening advances the epoch");
+    assert!(
+        window_began_ms(&fx, NODE).await?.expect("a window") >= first_window,
+        "the window must have restarted"
+    );
+    assert_eq!(spent_in_period(&fx, NODE).await?, "0");
+    Ok(())
+}
+
+/// Nobody signed for it, so nothing is given back. This is the one that was wrong.
+#[tokio::test]
+async fn a_tightening_bumps_nothing_and_keeps_the_ledger() -> anyhow::Result<()> {
+    let (fx, pk) = ready().await?;
+    let token = fx.token.id().to_string();
+    let window_before = window_began_ms(&fx, NODE).await?.expect("a window");
 
     let tighter = rule(&token, 500, 10_000, 86_400_000, 0, u64::MAX, &["alice.testnet"], false);
     set_rule(&fx, &fx.admin, NODE, &tighter, None).await?.into_result()?;
-    assert_eq!(epoch_of(&fx, NODE).await?, Some(1), "a tightening bumps the epoch too");
-    assert_eq!(spent_in_period(&fx, NODE).await?, "0");
+    assert_eq!(epoch_of(&fx, NODE).await?, Some(0), "a tightening must not advance the epoch");
+    assert_eq!(
+        window_began_ms(&fx, NODE).await?,
+        Some(window_before),
+        "a tightening must not restart the window"
+    );
 
-    set_rule(&fx, &fx.admin, NODE, &tighter, None).await?.into_result()?;
-    assert_eq!(epoch_of(&fx, NODE).await?, Some(2), "every accepted set_rule bumps it");
+    // Re-applying the identical rule, repeatedly: the cheapest form of the attack, since
+    // `classify` calls it a tightening and it needs no signature.
+    for _ in 0..5 {
+        set_rule(&fx, &fx.admin, NODE, &tighter, None).await?.into_result()?;
+    }
+    assert_eq!(
+        epoch_of(&fx, NODE).await?,
+        Some(0),
+        "five free rule changes must not have advanced the epoch"
+    );
+    assert_eq!(
+        window_began_ms(&fx, NODE).await?,
+        Some(window_before),
+        "five free rule changes must not have restarted the window"
+    );
 
-    // A payee change does not touch the budget arithmetic, so it must not bump the epoch:
-    // a bump would hand the node a fresh period limit nobody signed for.
+    // And a payee change does not touch the budget arithmetic either.
     let a = sign_add_payee(&fx, &pk, NODE, "bob.testnet").await?;
     add_payee(&fx, &fx.admin, NODE, "bob.testnet", a).await?.into_result()?;
-    assert_eq!(epoch_of(&fx, NODE).await?, Some(2), "add_payee must not bump the epoch");
+    assert_eq!(epoch_of(&fx, NODE).await?, Some(0), "add_payee must not advance the epoch");
+    assert_eq!(
+        window_began_ms(&fx, NODE).await?,
+        Some(window_before),
+        "add_payee must not restart the window"
+    );
+    Ok(())
+}
+
+/// `node_record` is one view call for everything the demo page draws, so it must agree with
+/// the individual views rather than being a second, drifting source of truth.
+#[tokio::test]
+async fn node_record_agrees_with_the_individual_views() -> anyhow::Result<()> {
+    let (fx, _pk) = ready().await?;
+    let record: serde_json::Value = fx
+        .wallet
+        .view("node_record")
+        .args_json(json!({ "node": NODE }))
+        .await?
+        .json()?;
+
+    assert_eq!(record["epoch"].as_u64(), epoch_of(&fx, NODE).await?.map(u64::from));
+    assert_eq!(record["spent"].as_str(), Some(spent_in_period(&fx, NODE).await?.as_str()));
+    assert_eq!(record["window_began_ms"].as_u64(), window_began_ms(&fx, NODE).await?);
+    assert_eq!(record["rule"], rule_of(&fx, NODE).await?.expect("a rule"));
     Ok(())
 }
 
@@ -602,12 +701,150 @@ async fn sign_add_payee(
         stored["paused"].as_bool().expect("paused"),
     )
     .map_err(anyhow::Error::msg)?;
-    sign_rule(fx, pk, node, &proposed).await
+    // ACTION_ADD_PAYEE, not ACTION_SET_RULE: `set_rule` resets the spend ledger and
+    // `add_payee` does not, so the two must not share a tag.
+    sign(fx, pk, ACTION_ADD_PAYEE, &set_rule_payload(node, &proposed)).await
 }
 
-/// NEP-141 `ft_transfer` fails for a receiver with no storage deposit, so putting a payee on
-/// the allow-list also registers it on the token. Without this a legitimate payment fails
-/// for a reason that has nothing to do with policy, and the demo looks like a policy bug.
+/// **The invariant: every payee on a node's allow-list can receive an `ft_transfer`.**
+///
+/// NEP-141 `ft_transfer` fails for a receiver with no storage deposit on the token, so a
+/// payee that is listed but unregistered makes a legitimate payment fail for a reason that
+/// has nothing to do with policy. On recording day that reads as a broken product.
+///
+/// Two paths write a payee and the invariant has to hold on both. An earlier version
+/// enforced it in `add_payee` only, while `set_rule` wrote any list it liked with no
+/// registration at all — and the test helpers used that path, so every test's primary payee
+/// was unregistered and Task 6's first transfer would have failed for a non-policy reason.
+#[tokio::test]
+async fn every_payee_on_the_list_is_registered_whichever_path_added_it() -> anyhow::Result<()> {
+    let fx = deploy_with_token().await?;
+    let pk = Passkey::new("admin phone");
+    register(&fx, &pk).await?;
+    let token = fx.token.id().to_string();
+
+    assert!(!is_registered_on_token(&fx, "alice.testnet").await?, "precondition");
+    assert!(!is_registered_on_token(&fx, "carol.testnet").await?, "precondition");
+
+    // Path 1: set_rule introduces two payees at once.
+    let two = rule(
+        &token,
+        1_000,
+        10_000,
+        86_400_000,
+        0,
+        u64::MAX,
+        &["alice.testnet", "carol.testnet"],
+        false,
+    );
+    set_rule_signed(&fx, &pk, NODE, &two).await?;
+
+    // Path 2: add_payee introduces a third.
+    let a = sign_add_payee(&fx, &pk, NODE, "bob.testnet").await?;
+    add_payee(&fx, &fx.admin, NODE, "bob.testnet", a).await?.into_result()?;
+
+    let payees = payees_of(&fx, NODE).await?;
+    assert_eq!(payees.len(), 3, "all three payees are listed: {payees:?}");
+    for payee in &payees {
+        assert!(
+            is_registered_on_token(&fx, payee).await?,
+            "{payee} is on the list but cannot receive a transfer"
+        );
+    }
+    Ok(())
+}
+
+/// The same invariant from the failing side on the `set_rule` path: if a payee cannot be
+/// registered, the rule is not applied at all. Half a rule is worse than none — it would put
+/// a payee on the list that cannot be paid.
+#[tokio::test]
+async fn a_rule_whose_payee_cannot_be_registered_is_not_applied() -> anyhow::Result<()> {
+    let fx = deploy_with_token().await?;
+    let pk = Passkey::new("admin phone");
+    register(&fx, &pk).await?;
+
+    // A token contract that does not exist, so the cross-contract call fails.
+    let doomed = base_rule("nosuch.token.testnet");
+    let nonce_before = nonce_of(&fx, &pk).await?;
+    let a = sign_rule(&fx, &pk, NODE, &doomed).await?;
+    let res = set_rule(&fx, &fx.admin, NODE, &doomed, Some(a)).await?;
+
+    assert!(
+        res.is_success(),
+        "a failed storage_deposit should be handled, not blow up the call: {res:#?}"
+    );
+    assert!(!res.json::<bool>()?, "the callback claimed the rule was applied");
+    assert!(
+        rule_of(&fx, NODE).await?.is_none(),
+        "the rule was applied even though its payee cannot be paid"
+    );
+    assert_eq!(
+        nonce_of(&fx, &pk).await?,
+        nonce_before + 1,
+        "the assertion must stay spent, so it cannot be replayed"
+    );
+    Ok(())
+}
+
+/// A tightening introduces no payee — any addition is a loosening by `classify` — so it has
+/// nothing to register and must stay synchronous. The emergency brake does not wait on
+/// another contract.
+#[tokio::test]
+async fn a_tightening_does_not_wait_on_the_token() -> anyhow::Result<()> {
+    let (fx, _pk) = ready().await?;
+    let token = fx.token.id().to_string();
+
+    let tighter = rule(&token, 1, 1, 86_400_000, 0, u64::MAX, &[], false);
+    let res = set_rule(&fx, &fx.admin, NODE, &tighter, None).await?;
+    assert!(res.is_success(), "tightening was refused: {res:#?}");
+    // One receipt for the call itself and no cross-contract call after it. `receipt_outcomes`
+    // counts the receipts the transaction produced; a dispatched storage_deposit plus its
+    // callback would add two more.
+    assert_eq!(
+        res.receipt_outcomes().len(),
+        1,
+        "a tightening dispatched a cross-contract call: {:#?}",
+        res.receipt_outcomes()
+    );
+    assert_eq!(payees_of(&fx, NODE).await?, Vec::<String>::new());
+    Ok(())
+}
+
+/// One call may only introduce a bounded number of payees, because each one costs a
+/// `storage_deposit` receipt and the whole transaction has 300 TGas. A longer list is built
+/// up over several calls.
+#[tokio::test]
+async fn a_rule_introducing_too_many_payees_at_once_is_refused() -> anyhow::Result<()> {
+    let fx = deploy_with_token().await?;
+    let pk = Passkey::new("admin phone");
+    register(&fx, &pk).await?;
+    let token = fx.token.id().to_string();
+
+    let nine: Vec<String> = (0..9).map(|i| format!("p{i}.testnet")).collect();
+    let refs: Vec<&str> = nine.iter().map(String::as_str).collect();
+    let too_many = rule(&token, 1_000, 10_000, 86_400_000, 0, u64::MAX, &refs, false);
+
+    let a = sign_rule(&fx, &pk, NODE, &too_many).await?;
+    let res = set_rule(&fx, &fx.admin, NODE, &too_many, Some(a)).await?;
+    assert!(res.is_failure(), "nine new payees in one call were accepted: {res:#?}");
+    let msg = why(res);
+    assert!(msg.contains("too many new payees"), "refused, but not for the batch size: {msg}");
+
+    // Eight is the documented bound, and it works.
+    let eight: Vec<String> = (0..8).map(|i| format!("p{i}.testnet")).collect();
+    let refs: Vec<&str> = eight.iter().map(String::as_str).collect();
+    let ok = rule(&token, 1_000, 10_000, 86_400_000, 0, u64::MAX, &refs, false);
+    set_rule_signed(&fx, &pk, NODE, &ok).await?;
+    assert_eq!(payees_of(&fx, NODE).await?.len(), 8);
+    for payee in payees_of(&fx, NODE).await? {
+        assert!(is_registered_on_token(&fx, &payee).await?, "{payee} was not registered");
+    }
+    Ok(())
+}
+
+/// `add_payee` registers the payee it adds. The narrower half of
+/// `every_payee_on_the_list_is_registered_whichever_path_added_it`, kept because the plan
+/// names it and it checks the before/after rather than only the after.
 #[tokio::test]
 async fn adding_a_payee_registers_storage_on_the_token() -> anyhow::Result<()> {
     let (fx, pk) = ready().await?;
@@ -659,18 +896,25 @@ async fn adding_a_payee_without_an_assertion_is_impossible() -> anyhow::Result<(
     Ok(())
 }
 
-/// If the token's `storage_deposit` fails, the payee must not end up on the list: the whole
-/// reason to call it is to keep "on the list" meaning "can be paid". The assertion is spent
-/// either way — a nonce is never un-consumed, because that would re-arm the assertion.
+/// The `add_payee` half of the invariant: if the token's `storage_deposit` fails, the payee
+/// must not end up on the list, because the whole reason to call it is to keep "on the list"
+/// meaning "can be paid". The assertion is spent either way — a nonce is never un-consumed,
+/// since that would re-arm the assertion.
+///
+/// The starting rule names a token contract that does not exist **and lists no payees**, so
+/// `set_rule` has nothing to register and applies synchronously; the failure then happens in
+/// `add_payee` rather than in the rule change, which is what this test is about. The
+/// `set_rule` half is `a_rule_whose_payee_cannot_be_registered_is_not_applied`.
 #[tokio::test]
 async fn a_failed_storage_deposit_leaves_the_payee_off_the_list() -> anyhow::Result<()> {
     let fx = deploy_with_token().await?;
     let pk = Passkey::new("admin phone");
     register(&fx, &pk).await?;
 
-    // A rule naming a token contract that does not exist, so the cross-contract call fails.
     let missing_token = "nosuch.token.testnet";
-    set_rule_signed(&fx, &pk, NODE, &base_rule(missing_token)).await?;
+    let no_payees = rule(missing_token, 1_000, 10_000, 86_400_000, 0, u64::MAX, &[], false);
+    set_rule_signed(&fx, &pk, NODE, &no_payees).await?;
+    assert_eq!(payees_of(&fx, NODE).await?, Vec::<String>::new());
 
     let nonce_before = nonce_of(&fx, &pk).await?;
     let a = sign_add_payee(&fx, &pk, NODE, "bob.testnet").await?;
@@ -682,7 +926,7 @@ async fn a_failed_storage_deposit_leaves_the_payee_off_the_list() -> anyhow::Res
     assert!(!res.json::<bool>()?, "the callback claimed success");
     assert_eq!(
         payees_of(&fx, NODE).await?,
-        vec!["alice.testnet".to_string()],
+        Vec::<String>::new(),
         "the payee was added even though it cannot receive a transfer"
     );
     assert_eq!(
@@ -752,9 +996,10 @@ async fn removing_a_payee_needs_no_assertion() -> anyhow::Result<()> {
 }
 
 /// Pausing a node is a tightening, so it is free. Unpausing is a loosening and is gated —
-/// the asymmetry the whole design rests on, on one field.
+/// the asymmetry the whole design rests on, on one `Rule` field. The account-wide switch is
+/// `pausing_the_account_is_free_but_unpausing_needs_a_passkey`.
 #[tokio::test]
-async fn pausing_is_free_but_unpausing_needs_a_passkey() -> anyhow::Result<()> {
+async fn pausing_a_node_is_free_but_unpausing_needs_a_passkey() -> anyhow::Result<()> {
     let (fx, pk) = ready().await?;
     let token = fx.token.id().to_string();
     let running = base_rule(&token);
@@ -771,6 +1016,285 @@ async fn pausing_is_free_but_unpausing_needs_a_passkey() -> anyhow::Result<()> {
 
     set_rule_signed(&fx, &pk, NODE, &running).await?;
     assert_eq!(rule_of(&fx, NODE).await?.expect("rule")["paused"], json!(false));
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------
+// Credential rotation
+// ---------------------------------------------------------------------------------------
+
+async fn remove_credential(
+    fx: &Fixture,
+    caller: &Account,
+    pk: &Passkey,
+) -> anyhow::Result<near_workspaces::result::ExecutionFinalResult> {
+    Ok(caller
+        .call(fx.wallet.id(), "remove_credential")
+        .args_json(json!({ "credential_id": STANDARD.encode(&pk.credential_id) }))
+        .max_gas()
+        .transact()
+        .await?)
+}
+
+/// Removing a credential is a tightening, so it is ungated — and it has to exist. Without it,
+/// `MAX_CREDENTIALS` is a *lifetime* budget on an account whose code cannot be redeployed:
+/// after eight rotations no loosening would ever be possible again, with no way out.
+#[tokio::test]
+async fn a_removed_credential_cannot_authorise_a_widening() -> anyhow::Result<()> {
+    let (fx, pk) = ready().await?;
+    let token = fx.token.id().to_string();
+    let wider = rule(&token, 9_000, 10_000, 86_400_000, 0, u64::MAX, &["alice.testnet"], false);
+
+    // Sign while it is still valid, so the only thing wrong with the assertion below is that
+    // the credential has since been removed.
+    let a = sign_rule(&fx, &pk, NODE, &wider).await?;
+
+    remove_credential(&fx, &fx.admin, &pk).await?.into_result()?;
+    assert!(
+        fx.wallet
+            .view("credential_ids")
+            .await?
+            .json::<Vec<String>>()?
+            .is_empty(),
+        "the removed credential is still listed as usable"
+    );
+    assert_eq!(nonce_of(&fx, &pk).await.ok(), None, "a removed credential has no next nonce");
+
+    let res = set_rule(&fx, &fx.admin, NODE, &wider, Some(a)).await?;
+    assert!(res.is_failure(), "a removed credential widened a rule: {res:#?}");
+    let msg = why(res);
+    assert!(msg.contains("no such active credential"), "refused, but not for removal: {msg}");
+    Ok(())
+}
+
+/// The slot comes back, so rotation is unlimited even though eight is the cap at any moment.
+#[tokio::test]
+async fn removing_a_credential_frees_a_slot_for_a_new_one() -> anyhow::Result<()> {
+    let fx = deploy_with_token().await?;
+
+    // Fill every slot.
+    let keys: Vec<Passkey> = (0..8).map(|i| Passkey::new(&format!("phone {i}"))).collect();
+    for pk in &keys {
+        register(&fx, pk).await?;
+    }
+    let ninth = Passkey::new("phone 8");
+    let res = fx
+        .admin
+        .call(fx.wallet.id(), "register_credential")
+        .args_json(ninth.registration())
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(res.is_failure(), "a ninth credential was registered: {res:#?}");
+    let msg = why(res);
+    assert!(msg.contains("too many active credentials"), "refused, but not for the cap: {msg}");
+
+    // Free one, and the ninth fits.
+    remove_credential(&fx, &fx.admin, &keys[0]).await?.into_result()?;
+    register(&fx, &ninth).await?;
+    let usable: Vec<String> = fx.wallet.view("credential_ids").await?.json()?;
+    assert_eq!(usable.len(), 8);
+    assert!(usable.contains(&STANDARD.encode(&ninth.credential_id)));
+    assert!(!usable.contains(&STANDARD.encode(&keys[0].credential_id)));
+
+    // The removed credential is still remembered, so its id cannot come back at nonce 0.
+    let all: Vec<serde_json::Value> = fx.wallet.view("credentials").await?.json()?;
+    assert_eq!(all.len(), 9, "the revoked credential must be retained, not deleted");
+    assert_eq!(
+        all.iter().filter(|c| c["revoked"] == json!(true)).count(),
+        1,
+        "exactly one revoked credential"
+    );
+
+    // And re-registering the removed id is still refused.
+    let res = fx
+        .admin
+        .call(fx.wallet.id(), "register_credential")
+        .args_json(keys[0].registration())
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(res.is_failure(), "a removed credential id was re-registered: {res:#?}");
+    let msg = why(res);
+    assert!(msg.contains("already known"), "refused, but not as a known id: {msg}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn remove_credential_is_admin_only() -> anyhow::Result<()> {
+    let (fx, pk) = ready().await?;
+    let stranger = fx.worker.dev_create_account().await?;
+
+    let res = remove_credential(&fx, &stranger, &pk).await?;
+    assert!(res.is_failure(), "a stranger removed a credential: {res:#?}");
+    let msg = why(res);
+    assert!(msg.contains("only the admin may change rules"), "not the admin check: {msg}");
+    assert_eq!(fx.wallet.view("credential_ids").await?.json::<Vec<String>>()?.len(), 1);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------
+// The account-wide pause
+// ---------------------------------------------------------------------------------------
+
+async fn is_paused(fx: &Fixture) -> anyhow::Result<bool> {
+    Ok(fx.wallet.view("is_paused").await?.json()?)
+}
+
+async fn set_paused(
+    fx: &Fixture,
+    caller: &Account,
+    paused: bool,
+    assertion: Option<AssertionJson>,
+) -> anyhow::Result<near_workspaces::result::ExecutionFinalResult> {
+    Ok(caller
+        .call(fx.wallet.id(), "set_paused")
+        .args_json(json!({ "paused": paused, "assertion": assertion }))
+        .max_gas()
+        .transact()
+        .await?)
+}
+
+/// The same asymmetry as everywhere else, on the one switch that covers every node at once.
+#[tokio::test]
+async fn pausing_the_account_is_free_but_unpausing_needs_a_passkey() -> anyhow::Result<()> {
+    let (fx, pk) = ready().await?;
+    assert!(!is_paused(&fx).await?);
+
+    set_paused(&fx, &fx.admin, true, None).await?.into_result()?;
+    assert!(is_paused(&fx).await?, "pausing did not take");
+
+    let res = set_paused(&fx, &fx.admin, false, None).await?;
+    assert!(res.is_failure(), "the account was unpaused with no assertion: {res:#?}");
+    let msg = why(res);
+    assert!(msg.contains("needs a passkey assertion"), "refused, but not by the gate: {msg}");
+    assert!(is_paused(&fx).await?, "a refused unpause took effect anyway");
+
+    let a = sign(&fx, &pk, ACTION_UNPAUSE, &[]).await?;
+    set_paused(&fx, &fx.admin, false, Some(a)).await?.into_result()?;
+    assert!(!is_paused(&fx).await?, "a signed unpause did not take");
+    Ok(())
+}
+
+#[tokio::test]
+async fn set_paused_is_admin_only() -> anyhow::Result<()> {
+    let (fx, _pk) = ready().await?;
+    let stranger = fx.worker.dev_create_account().await?;
+
+    let res = set_paused(&fx, &stranger, true, None).await?;
+    assert!(res.is_failure(), "a stranger paused the account: {res:#?}");
+    let msg = why(res);
+    assert!(msg.contains("only the admin may change rules"), "not the admin check: {msg}");
+    assert!(!is_paused(&fx).await?);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------
+// Signatures cannot be redirected between operations
+// ---------------------------------------------------------------------------------------
+//
+// Each gated operation signs under its own action tag. These three tests are the reason the
+// tags are separate rather than shared: every pair of operations reaches a different state,
+// so a signature for one must not authorise another.
+
+/// `add_payee` leaves the spend ledger alone and `set_rule` resets it, so an assertion signed
+/// to add a payee must not be redirectable into a rule change that also wipes the ledger —
+/// headroom the signer never agreed to hand back.
+#[tokio::test]
+async fn an_add_payee_assertion_cannot_set_a_rule() -> anyhow::Result<()> {
+    let (fx, pk) = ready().await?;
+    let token = fx.token.id().to_string();
+
+    // The rule that `add_payee(bob)` would produce, signed under the add_payee tag.
+    let a = sign_add_payee(&fx, &pk, NODE, "bob.testnet").await?;
+    let same_rule = rule(
+        &token,
+        1_000,
+        10_000,
+        86_400_000,
+        0,
+        u64::MAX,
+        &["alice.testnet", "bob.testnet"],
+        false,
+    );
+
+    let res = set_rule(&fx, &fx.admin, NODE, &same_rule, Some(a)).await?;
+    assert!(res.is_failure(), "an add_payee assertion was accepted by set_rule: {res:#?}");
+    let msg = why(res);
+    assert!(msg.contains("ChallengeMismatch"), "refused, but not by the action tag: {msg}");
+    assert_eq!(epoch_of(&fx, NODE).await?, Some(0), "the ledger was reset anyway");
+    Ok(())
+}
+
+/// And the other way round.
+#[tokio::test]
+async fn a_set_rule_assertion_cannot_add_a_payee() -> anyhow::Result<()> {
+    let (fx, pk) = ready().await?;
+    let token = fx.token.id().to_string();
+    let same_rule = rule(
+        &token,
+        1_000,
+        10_000,
+        86_400_000,
+        0,
+        u64::MAX,
+        &["alice.testnet", "bob.testnet"],
+        false,
+    );
+
+    let a = sign_rule(&fx, &pk, NODE, &same_rule).await?;
+    let res = add_payee(&fx, &fx.admin, NODE, "bob.testnet", a).await?;
+    assert!(res.is_failure(), "a set_rule assertion was accepted by add_payee: {res:#?}");
+    let msg = why(res);
+    assert!(msg.contains("ChallengeMismatch"), "refused, but not by the action tag: {msg}");
+    assert_eq!(payees_of(&fx, NODE).await?, vec!["alice.testnet".to_string()]);
+    Ok(())
+}
+
+/// An unpause assertion commits to no node and no rule, so without separate tags it would be
+/// the most reusable signature in the contract.
+#[tokio::test]
+async fn an_unpause_assertion_cannot_widen_a_rule() -> anyhow::Result<()> {
+    let (fx, pk) = ready().await?;
+    let token = fx.token.id().to_string();
+    let wider = rule(&token, 9_000, 10_000, 86_400_000, 0, u64::MAX, &["alice.testnet"], false);
+
+    let a = sign(&fx, &pk, ACTION_UNPAUSE, &[]).await?;
+    let res = set_rule(&fx, &fx.admin, NODE, &wider, Some(a)).await?;
+    assert!(res.is_failure(), "an unpause assertion widened a rule: {res:#?}");
+    let msg = why(res);
+    assert!(msg.contains("ChallengeMismatch"), "refused, but not by the action tag: {msg}");
+
+    // And a set_rule assertion cannot unpause the account.
+    set_paused(&fx, &fx.admin, true, None).await?.into_result()?;
+    let a = sign_rule(&fx, &pk, NODE, &wider).await?;
+    let res = set_paused(&fx, &fx.admin, false, Some(a)).await?;
+    assert!(res.is_failure(), "a set_rule assertion unpaused the account: {res:#?}");
+    assert!(is_paused(&fx).await?);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------
+// The build itself
+// ---------------------------------------------------------------------------------------
+
+/// Every negative test in this file asserts on the *reason* a call was refused, and that only
+/// works if the wasm was built with `--cfg near`. Without it near-sdk compiles `panic_str` to
+/// a pure-Rust `panic!()`, which under `panic = "abort"` becomes a wasm trap with the message
+/// discarded — and on the deploy path nothing would say so.
+///
+/// `--cfg near` makes `panic_str` call the host function `panic_utf8`, which then appears in
+/// the wasm's import section. This is the canary: if a near-sdk upgrade changes how the host
+/// calls are gated, or a build stops passing the flag, this fails before the twelve
+/// message-asserting tests start failing for a reason nobody can see.
+#[tokio::test]
+async fn the_contract_wasm_talks_to_the_host_panic_function() -> anyhow::Result<()> {
+    let wasm = build_wasm("leash-contract")?;
+    assert!(
+        wasm.windows(HOST_PANIC_IMPORT.len()).any(|w| w == HOST_PANIC_IMPORT),
+        "the built wasm does not import `panic_utf8`, so it was built without `--cfg near` \
+         and would discard every refusal reason on chain"
+    );
     Ok(())
 }
 
@@ -824,44 +1348,85 @@ async fn challenge_for_matches_the_documented_layout() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The figure the README quotes for the gated path: a widening `set_rule` end to end —
-/// transaction, contract load, JSON parse, `classify`, P-256 verification and the state
-/// write. `probe_verify` measured the curve arithmetic alone at 33.46 TGas in Task 4.
+/// The figures the README quotes. Three paths, because they cost very different things and
+/// quoting one number for "set_rule" would hide which part is expensive:
+///
+/// 1. a widening that introduces a payee — the gate, plus a `storage_deposit` on the token
+///    and the callback that commits the rule
+/// 2. a widening that introduces none — the gate alone, committed synchronously
+/// 3. a tightening — no gate at all, the emergency brake
+///
+/// `probe_verify` measured the curve arithmetic on its own in Task 4.
 #[tokio::test]
 async fn a_widening_set_rule_fits_in_gas() -> anyhow::Result<()> {
     let (fx, pk) = ready().await?;
     let token = fx.token.id().to_string();
-    let wider = rule(&token, 100_000, 1_000_000, 3_600_000, 0, u64::MAX, &["alice.testnet", "bob.testnet"], false);
 
-    let a = sign_rule(&fx, &pk, NODE, &wider).await?;
-    let outcome = set_rule(&fx, &fx.admin, NODE, &wider, Some(a)).await?;
+    // 1. Widening that introduces `bob.testnet`, so the token has to register it.
+    let with_payee = rule(
+        &token,
+        100_000,
+        1_000_000,
+        3_600_000,
+        0,
+        u64::MAX,
+        &["alice.testnet", "bob.testnet"],
+        false,
+    );
+    let a = sign_rule(&fx, &pk, NODE, &with_payee).await?;
+    let outcome = set_rule(&fx, &fx.admin, NODE, &with_payee, Some(a)).await?;
     assert!(outcome.is_success(), "the measured call failed: {outcome:#?}");
-    let widening = outcome.total_gas_burnt;
+    let widening_with_payee = outcome.total_gas_burnt;
 
-    // The same method with no assertion to verify, for the difference.
+    // 2. Widening that introduces no payee: raise a limit on the list we already have.
+    let no_new_payee = rule(
+        &token,
+        200_000,
+        1_000_000,
+        3_600_000,
+        0,
+        u64::MAX,
+        &["alice.testnet", "bob.testnet"],
+        false,
+    );
+    let a = sign_rule(&fx, &pk, NODE, &no_new_payee).await?;
+    let outcome = set_rule(&fx, &fx.admin, NODE, &no_new_payee, Some(a)).await?;
+    assert!(outcome.is_success(), "the measured call failed: {outcome:#?}");
+    let widening_only = outcome.total_gas_burnt;
+
+    // 3. The same method with no assertion to verify.
     let tighter = rule(&token, 1, 1, 86_400_000, 0, u64::MAX, &[], false);
     let tightening = set_rule(&fx, &fx.admin, NODE, &tighter, None)
         .await?
         .total_gas_burnt;
 
+    let tgas = |g: Gas| g.as_gas() as f64 / 1e12;
     println!(
-        "set_rule (widening, with a passkey assertion): {widening} ({:.2} TGas)",
-        widening.as_gas() as f64 / 1e12
+        "set_rule (widening, assertion + a new payee registered): {widening_with_payee} ({:.2} TGas)",
+        tgas(widening_with_payee)
     );
     println!(
-        "set_rule (tightening, no assertion):           {tightening} ({:.2} TGas)",
-        tightening.as_gas() as f64 / 1e12
+        "set_rule (widening, assertion, no new payee):             {widening_only} ({:.2} TGas)",
+        tgas(widening_only)
     );
     println!(
-        "  the gate costs: {:.2} TGas",
-        (widening.as_gas().saturating_sub(tightening.as_gas())) as f64 / 1e12
+        "set_rule (tightening, no assertion):                      {tightening} ({:.2} TGas)",
+        tgas(tightening)
+    );
+    println!(
+        "  the passkey gate costs:        {:.2} TGas",
+        tgas(widening_only) - tgas(tightening)
+    );
+    println!(
+        "  registering one payee costs:   {:.2} TGas",
+        tgas(widening_with_payee) - tgas(widening_only)
     );
 
     assert!(
-        widening < Gas::from_tgas(80),
-        "a widening set_rule burnt {widening}, over the 80 TGas regression guard (the \
-         protocol limit is 300 TGas; this bound sits far below it so a regression shows up \
-         here first)"
+        widening_with_payee < Gas::from_tgas(100),
+        "the widest set_rule path burnt {widening_with_payee}, over the 100 TGas regression \
+         guard (the protocol limit is 300 TGas; this bound sits far below it so a regression \
+         shows up here first)"
     );
     Ok(())
 }

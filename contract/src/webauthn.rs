@@ -103,6 +103,9 @@ mod b64_bytes {
 /// credential after a migration needs it) and is safe only because re-registering an id is
 /// refused outright — see `register_credential`. A reset nonce would re-arm every assertion
 /// ever signed under that credential.
+///
+/// A supplied nonce is capped so the credential cannot be registered already exhausted: see
+/// [`MAX_INITIAL_NONCE`].
 #[near(serializers = [json])]
 pub struct CredentialInput {
     pub id: Base64VecU8,
@@ -110,10 +113,27 @@ pub struct CredentialInput {
     pub nonce: Option<u64>,
 }
 
+/// Highest nonce a credential may be *registered* with, leaving [`MIN_REMAINING_NONCES`]
+/// signatures of headroom.
+///
+/// Without a cap, registering at `u64::MAX` would produce a credential that panics
+/// ("credential nonce exhausted") the first time it is used — on an account whose code cannot
+/// be redeployed, with a credential id that can never be registered again. ADMIN-only and a
+/// typo away, so it is cheaper to refuse it at the door.
+pub const MIN_REMAINING_NONCES: u64 = 1_000_000;
+pub const MAX_INITIAL_NONCE: u64 = u64::MAX - MIN_REMAINING_NONCES;
+
 impl TryFrom<CredentialInput> for Credential {
     type Error = String;
     fn try_from(i: CredentialInput) -> Result<Self, String> {
-        Credential::try_new(i.id.into(), i.pubkey_sec1.into(), i.nonce.unwrap_or(0))
+        let nonce = i.nonce.unwrap_or(0);
+        if nonce > MAX_INITIAL_NONCE {
+            return Err(format!(
+                "nonce {nonce} leaves fewer than {MIN_REMAINING_NONCES} uses; \
+                 register at most {MAX_INITIAL_NONCE}"
+            ));
+        }
+        Credential::try_new(i.id.into(), i.pubkey_sec1.into(), nonce)
             .map_err(|e| format!("credential rejected: {e:?}"))
     }
 }
@@ -124,6 +144,12 @@ impl TryFrom<CredentialInput> for Credential {
 /// Fields are private and `try_new` is the only way in, so a `Credential` that exists is one
 /// whose public key parses. Rejecting a bad key at registration rather than at use matters
 /// here: the whole point of the credential is to be available in an emergency.
+///
+/// `revoked` is why a removed credential stays in state instead of being deleted. Deleting
+/// the entry would free the id for re-registration, and a re-registered id starts at nonce 0
+/// — which re-arms every assertion ever signed under it. A tombstone keeps the spent nonce
+/// forever, so the id is permanently unusable while the *slot* it occupied is free for a new
+/// credential. See `State::revoke_credential` and `register_credential`.
 #[near(serializers = [borsh, json])]
 #[serde(try_from = "CredentialInput")]
 #[derive(Clone, PartialEq, Debug)]
@@ -133,6 +159,7 @@ pub struct Credential {
     #[serde(serialize_with = "b64_bytes::serialize")]
     pubkey_sec1: Vec<u8>,
     nonce: u64,
+    revoked: bool,
 }
 
 impl Credential {
@@ -144,6 +171,7 @@ impl Credential {
             id,
             pubkey_sec1,
             nonce,
+            revoked: false,
         })
     }
 
@@ -157,6 +185,18 @@ impl Credential {
 
     pub fn nonce(&self) -> u64 {
         self.nonce
+    }
+
+    /// Whether this credential has been revoked. A revoked credential authorises nothing;
+    /// the entry survives only to keep its id and spent nonce out of circulation.
+    pub fn revoked(&self) -> bool {
+        self.revoked
+    }
+
+    /// Mark this credential revoked. Irreversible on purpose: un-revoking would put an id
+    /// whose nonce is known back into service.
+    pub fn revoke(&mut self) {
+        self.revoked = true;
     }
 
     /// Spend this credential's current nonce. Called only after an assertion has verified,
@@ -505,6 +545,32 @@ mod tests {
             ),
             Err(VerifyError::Malformed)
         );
+    }
+
+    #[test]
+    fn a_registration_nonce_must_leave_headroom() {
+        use near_sdk::json_types::Base64VecU8;
+        let f = valid();
+        let input = |nonce: u64| CredentialInput {
+            id: Base64VecU8::from(f.credential_id.clone()),
+            pubkey_sec1: Base64VecU8::from(f.pubkey_sec1.clone()),
+            nonce: Some(nonce),
+        };
+        assert!(Credential::try_from(input(u64::MAX)).is_err());
+        assert!(Credential::try_from(input(MAX_INITIAL_NONCE + 1)).is_err());
+        assert!(Credential::try_from(input(MAX_INITIAL_NONCE)).is_ok());
+        assert!(Credential::try_from(input(0)).is_ok());
+    }
+
+    #[test]
+    fn a_fresh_credential_is_not_revoked_and_revocation_sticks() {
+        let f = valid();
+        let mut c = f.cred();
+        assert!(!c.revoked());
+        c.revoke();
+        assert!(c.revoked());
+        // No un-revoke exists: putting an id whose nonce is known back into service is the
+        // one thing a tombstone is there to prevent.
     }
 
     #[test]

@@ -25,7 +25,12 @@ sha2 = { version = "0.10", default-features = false }
 # `Rule` and its Borsh encoding, so the challenge layout is reproduced here from the
 # documented byte layout rather than read back out of the contract under test.
 leash-contract = { path = "../contract" }
-near-sdk = "5"
+# `unit-testing` is what lets near-sdk compile for the host at all: without it the crate
+# emits a compile_error for any non-wasm target, so `cargo check -p leash-sandbox-tests`
+# would fail on its own even though a whole-workspace `cargo test` happened to work (the
+# contract's own dev-dependency enables the feature, and cargo unifies it). Nothing here
+# calls into the mock VM; this only unlocks the host build.
+near-sdk = { version = "5", features = ["unit-testing"] }
 tokio = { version = "1", features = ["full"] }
 
 [[test]]
