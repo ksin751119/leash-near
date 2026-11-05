@@ -21,7 +21,7 @@
 - Timestamps use `env::block_timestamp_ms()`; `period_ms` is in milliseconds.
 - Security claims in the README must each name a test. A claim without a test is deleted from the README, not left unproven.
 - Passkey wording is "a human was present", never "a unique human".
-- The repo is `git init`-ed on **1 Nov 2026** and every commit lands inside the dev window.
+- The repo was `git init`-ed on **5 Nov 2026**; every commit lands inside the 1-14 Nov dev window.
 
 ## Review Focus
 
@@ -39,7 +39,7 @@ Input classes the spec implies but which no obvious happy-path test exercises. E
 
 **Files:**
 - Create: `Cargo.toml`, `rust-toolchain.toml`, `contract/Cargo.toml`, `contract/src/lib.rs`
-- Create: `tests/sandbox/account_is_frozen.rs`
+- Create: `tests-sandbox/tests/sandbox/account_is_frozen.rs`
 - Create: `scripts/deploy.sh`, `scripts/freeze.sh`
 - Create: `README.md` (skeleton: title, one-line thesis, build/test commands)
 
@@ -50,7 +50,7 @@ Input classes the spec implies but which no obvious happy-path test exercises. E
 - [ ] **Step 1: Write the failing sandbox test**
 
 ```rust
-// tests/sandbox/account_is_frozen.rs
+// tests-sandbox/tests/sandbox/account_is_frozen.rs
 #[tokio::test]
 async fn deploying_new_code_fails_after_freeze() -> anyhow::Result<()> {
     let (worker, wallet) = deploy_and_freeze().await?;
@@ -114,7 +114,7 @@ git add -A && git commit -m "feat: contract skeleton and a test that the account
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `cargo test -p leash-account node::`
+Run: `cargo test -p leash-contract node::`
 Expected: FAIL — `node_of` not found.
 
 - [ ] **Step 3: Implement `node_of`**
@@ -123,7 +123,7 @@ Split once on the first `.`; parse the remainder back into an `AccountId` and re
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `cargo test -p leash-account node::`
+Run: `cargo test -p leash-contract node::`
 Expected: PASS (4 tests)
 
 - [ ] **Step 5: Commit**
@@ -143,7 +143,7 @@ git add -A && git commit -m "feat: derive a budget node from an agent account id
 **Interfaces:**
 - Consumes: nothing.
 - Produces:
-  - `pub struct Rule { token: AccountId, per_tx_limit: u128, period_limit: u128, period_ms: u64, window_start_ms: u64, window_end_ms: u64, payees: Vec<AccountId>, paused: bool, epoch: u32 }`
+  - `pub struct Rule { token: AccountId, per_tx_limit: u128, period_limit: u128, period_ms: u64, window_start_ms: u64, window_end_ms: u64, payees: Vec<AccountId>, paused: bool }` — **no `epoch` field**: the epoch belongs to the per-node stored record (Task 5), so the bytes a passkey signs are exactly the bytes the caller submitted
   - `pub enum Change { Tightening, Widening }`
   - `pub fn classify(current: &Rule, proposed: &Rule) -> Change`
 
@@ -165,7 +165,7 @@ One test per field from the spec's table, each asserting `Widening`, plus the in
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `cargo test -p leash-account rule::`
+Run: `cargo test -p leash-contract rule::`
 Expected: FAIL — `classify` not found.
 
 - [ ] **Step 3: Implement `classify` as a list of field comparators**
@@ -174,7 +174,7 @@ Each entry is a closure `(&Rule, &Rule) -> bool` answering "does this field loos
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `cargo test -p leash-account rule::`
+Run: `cargo test -p leash-contract rule::`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -189,9 +189,9 @@ git add -A && git commit -m "feat: rule type and a field-by-field widening compa
 
 **Files:**
 - Create: `contract/src/webauthn.rs`
-- Create: `tests/fixtures/assertion_valid.json`, `assertion_uv_clear.json`, `assertion_wrong_challenge.json` (captured from a real browser via `tools/capture-assertion.html`)
-- Create: `tools/capture-assertion.html`
-- Test: `contract/src/webauthn.rs` (unit), `tests/sandbox/widen_requires_passkey.rs`
+- Create: `tests-sandbox/tests/fixtures/assertion_valid.json`, `assertion_uv_clear.json`, `assertion_wrong_challenge.json` — **generated** by `tools/make-fixtures.mjs` (Node WebCrypto P-256, byte-exact WebAuthn encoding) so the unit tests run headless
+- Create: `tools/make-fixtures.mjs`, `tools/capture-assertion.html`
+- Test: `contract/src/webauthn.rs` (unit), `tests-sandbox/tests/sandbox/widen_requires_passkey.rs`
 
 **Interfaces:**
 - Consumes: `Rule` (Task 3).
@@ -202,7 +202,7 @@ git add -A && git commit -m "feat: rule type and a field-by-field widening compa
 
 - [ ] **Step 1: Build the capture tool and record fixtures**
 
-`tools/capture-assertion.html` registers a passkey and produces an assertion over a given challenge, printing JSON. Capture three fixtures: valid; UV bit clear (device PIN disabled / `userVerification: "discouraged"`); challenge for a different rule.
+`tools/make-fixtures.mjs` generates three byte-exact fixtures with WebCrypto P-256: valid; UV bit clear; challenge for a different rule. `tools/capture-assertion.html` registers a real passkey and prints a real assertion — it is not needed for the unit tests, but Task 10's preflight requires one real-device assertion to have been verified on-chain before recording.
 
 - [ ] **Step 2: Write the failing unit tests**
 
@@ -215,7 +215,7 @@ git add -A && git commit -m "feat: rule type and a field-by-field widening compa
 
 - [ ] **Step 3: Run them and watch them fail**
 
-Run: `cargo test -p leash-account webauthn::`
+Run: `cargo test -p leash-contract webauthn::`
 Expected: FAIL — `verify_assertion` not found.
 
 - [ ] **Step 4: Implement `verify_assertion`**
@@ -224,29 +224,33 @@ Check `authenticator_data[32] & 0x04` for UV; parse `client_data_json` with `ser
 
 - [ ] **Step 5: Run to verify they pass**
 
-Run: `cargo test -p leash-account webauthn::`
+Run: `cargo test -p leash-contract webauthn::`
 Expected: PASS
 
 - [ ] **Step 6: Write the gas test in the sandbox — this is the gate**
 
 ```rust
 #[tokio::test]
-async fn widening_with_a_real_assertion_fits_in_gas() -> anyhow::Result<()> {
-    let outcome = admin.call(wallet.id(), "set_rule").args_json(widening_with_assertion()).max_gas().transact().await?;
+async fn verifying_a_real_assertion_fits_in_gas() -> anyhow::Result<()> {
+    // `set_rule` does not exist until Task 5, so the gate measures a non-mutating probe.
+    let outcome = admin.call(wallet.id(), "probe_verify").args_json(valid_assertion()).max_gas().transact().await?;
     assert!(outcome.is_success());
     assert!(outcome.total_gas_burnt < Gas::from_tgas(300));
     Ok(())
 }
 ```
 
+`probe_verify(&self, credential_id, challenge, assertion) -> bool` changes no state and consumes no nonce; it exists so the P-256 cost can be measured before `set_rule` exists. Task 5 additionally asserts the whole `set_rule` path fits in 300 TGas, and that is the figure the README quotes.
+
 - [ ] **Step 7: Run it and record the number**
 
 Run: `cargo test --test widen_requires_passkey -- --nocapture`
 Expected: PASS, with the burnt gas printed. **Write the measured figure into the README.**
 
-> **Decision point — 5 Nov.** If this test is not green by then, stop. Replace Task 4 with the
-> timelock design (`queue_rule` + `apply_rule` after 24h, cancellable by ADMIN) and update the
-> spec's decision table and the README with the reason. Do not keep pushing on gas past 5 Nov.
+> **Decision point — 9 Nov.** (Moved from 5 Nov: the plan assumed a 1 Nov start and work began
+> 5 Nov.) If this test is not green by then, stop. Replace Task 4 with the timelock design
+> (`queue_rule` + `apply_rule` after 24h, cancellable by ADMIN) and update the spec's decision
+> table and the README with the reason. Do not keep pushing on gas past 9 Nov.
 
 - [ ] **Step 8: Commit**
 
@@ -261,7 +265,7 @@ git add -A && git commit -m "feat: verify a WebAuthn assertion on-chain, with a 
 **Files:**
 - Modify: `contract/src/lib.rs`
 - Create: `contract/src/state.rs`
-- Test: `tests/sandbox/rules.rs`
+- Test: `tests-sandbox/tests/sandbox/rules.rs`
 
 **Interfaces:**
 - Consumes: `Rule`, `classify` (Task 3), `verify_assertion`, `Credential` (Task 4).
@@ -310,12 +314,12 @@ git add -A && git commit -m "feat: rules in state, gated by admin and by the pas
 **Files:**
 - Modify: `contract/src/lib.rs`
 - Create: `contract/src/spend.rs`, `contract/src/decision.rs`
-- Test: `tests/sandbox/spend.rs`, `tests/sandbox/concurrency.rs`
+- Test: `tests-sandbox/tests/sandbox/spend.rs`, `tests-sandbox/tests/sandbox/concurrency.rs`
 
 **Interfaces:**
 - Consumes: `node_of` (Task 2), `Rule` (Task 3), state accessors (Task 5).
 - Produces:
-  - `pub fn spend(&mut self, payee: AccountId, amount: U128) -> PromiseOrValue<Outcome>`
+  - `pub fn spend(&mut self, token: AccountId, payee: AccountId, amount: U128) -> PromiseOrValue<Outcome>` — the token argument is required, otherwise refusal code 3 (wrong token) is unreachable
   - `#[private] pub fn on_transfer(&mut self, node: AccountId, record_id: u64, amount: U128) -> Outcome`
   - `pub enum Outcome { Allowed, Refused(u8), Failed }` with codes 1–7 exactly as the spec's table
   - `pub struct Decision { agent, node, payee, amount, outcome, spent_after, timestamp_ms }`
@@ -384,11 +388,12 @@ git add -A && git commit -m "feat: the payment path — refuse without panicking
 **Files:**
 - Modify: `contract/src/lib.rs`
 - Create: `scripts/grant-agent-key.sh`, `scripts/reset-demo.sh`
-- Test: `tests/sandbox/keys.rs`, `tests/sandbox/withdraw.rs`
+- Test: `tests-sandbox/tests/sandbox/keys.rs`, `tests-sandbox/tests/sandbox/withdraw.rs`
 
 **Interfaces:**
 - Consumes: `verify_assertion` (Task 4), `spend` (Task 6).
-- Produces: `pub fn withdraw(&mut self, to: AccountId, amount: U128, assertion: Assertion) -> Promise`, and the view `keys_report() -> KeysReport { full_access: u32, function_call: Vec<(PublicKey, Vec<String>)> }`.
+- Produces: `pub fn withdraw(&mut self, to: AccountId, amount: U128, assertion: Assertion) -> Promise`.
+- **No `keys_report` view** — no NEAR host function lets a contract enumerate its own access keys. Key facts come from RPC `view_access_key_list`: this task asserts them through near-workspaces, Task 9 reads them in `web/near.mjs`, Task 10's preflight checks them with the CLI.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -398,7 +403,7 @@ git add -A && git commit -m "feat: the payment path — refuse without panicking
 }
 #[tokio::test] async fn an_agent_key_cannot_call_the_token_contract_directly() { … }
 #[tokio::test] async fn withdraw_without_an_assertion_is_rejected() { … }
-#[tokio::test] async fn keys_report_shows_zero_full_access_keys_after_freeze() { … }
+#[tokio::test] async fn rpc_shows_zero_full_access_keys_after_freeze() { /* via the worker's access-key RPC, not a contract view */ }
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
@@ -406,7 +411,7 @@ git add -A && git commit -m "feat: the payment path — refuse without panicking
 Run: `cargo test --test keys --test withdraw`
 Expected: FAIL
 
-- [ ] **Step 3: Implement `withdraw` and `keys_report`; write the key-granting script**
+- [ ] **Step 3: Implement `withdraw`; write the key-granting script**
 
 `grant-agent-key.sh` adds a function-call key restricted to `receiver_id = wallet.leash.testnet`, `method_names = ["spend"]`, with a small gas allowance.
 
@@ -478,7 +483,7 @@ git add -A && git commit -m "feat: two agent processes sharing one budget"
 ```js
 test("renders a refusal with its reason name and no amount moved", …)
 test("the budget bar segments by agent and sums to spent_in_period", …)
-test("renders zero full-access keys as the headline fact", …)
+test("renders zero full-access keys as the headline fact", …)   // from RPC view_access_key_list, not a contract view
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
@@ -524,7 +529,7 @@ Expected: every check green.
 
 - [ ] **Step 3: Write the README**
 
-Each claim followed by the test that proves it, e.g. "the agent key cannot touch the token contract — `tests/sandbox/keys.rs::an_agent_key_cannot_call_the_token_contract_directly`". Include the measured gas figure from Task 4, the "a human was present" wording, and the lost-credential caveat.
+Each claim followed by the test that proves it, e.g. "the agent key cannot touch the token contract — `tests-sandbox/tests/sandbox/keys.rs::an_agent_key_cannot_call_the_token_contract_directly`". Include the measured gas figure from Task 4, the "a human was present" wording, and the lost-credential caveat.
 
 - [ ] **Step 4: Full test run**
 
