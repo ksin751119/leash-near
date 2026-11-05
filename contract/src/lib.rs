@@ -1,4 +1,5 @@
 mod node;
+mod rule;
 
 use near_sdk::{near, AccountId, PanicOnDefault};
 
