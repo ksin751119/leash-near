@@ -4,9 +4,15 @@ A NEAR wallet account that holds money, gives AI agents a key that can only call
 
 ## Passkeys on chain
 
-Tightening a spending rule is free and immediate. Loosening one requires a human to be physically present at a registered device: they unlock it with Face ID, a fingerprint or the device PIN, the device signs, and the **contract** checks that signature. No server, no oracle, no bridge.
+Tightening a spending rule is free and immediate. Loosening one requires a signature from a registered credential: in the intended flow somebody unlocks their phone with Face ID, a fingerprint or the device PIN, the device signs, and the **contract** checks that signature. No server, no oracle, no bridge.
 
-What a passing check proves is that *a human was present at a registered device* — never that a *unique* human was. Anyone enrolled on that device satisfies it exactly as well as the owner does.
+### What that check proves, exactly
+
+A passing check establishes two things and no more: that the holder of a registered credential signed **this exact challenge**, and that the authenticator asserted **user verification** (the UV bit) at the moment of signing.
+
+It **cannot** establish that the credential is hardware-backed rather than a software P-256 key. WebAuthn attestation is absent for synced passkeys — iCloud Keychain and Google Password Manager attest `none` — so the contract has no way to tell a secure enclave from a key minted in a script.
+
+**The guarantee is therefore only as strong as the registration step: whoever registers a credential vouches that it is a real authenticator.** Given a credential that genuinely is one, a passing check means a human was present at that device and unlocked it — and even then not a *unique* human, since anyone enrolled on that device satisfies it. Neither half of that may be quoted without the other.
 
 NEAR has host functions for ed25519 and secp256k1 but not for P-256, the curve WebAuthn signs with, so the curve arithmetic runs inside the wasm. That is the one part of this design that could have failed outright, so it was built first and measured:
 

@@ -42,6 +42,12 @@
 the JSON shape of <code>tests-sandbox/tests/fixtures/*.json</code>, so a real capture is a drop-in
 replacement for a generated fixture.</p>
 
+<p class="lede">Verifying one of these on chain proves that the holder of a registered credential
+signed that exact challenge, and that the authenticator asserted user verification. It does
+<strong>not</strong> prove the credential is hardware-backed rather than a software key — WebAuthn
+attestation is absent for synced passkeys — so the guarantee is only as strong as the registration
+step: whoever registers a credential vouches that it is a real authenticator.</p>
+
 <section>
   <h2>Before you start</h2>
   <ol>
@@ -97,6 +103,39 @@ const utf8 = (buf) => new TextDecoder().decode(buf);
 
 const STORE_KEY = "leash.capture.credential";
 const $ = (id) => document.getElementById(id);
+
+// P-256 group order, for reporting which half `s` landed in.
+const N = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n;
+
+/** Uncompressed SEC1 (0x04 ‖ X ‖ Y, 65 bytes) to compressed (0x02/0x03 ‖ X, 33 bytes). */
+function compressSec1(uncompressed) {
+  const u = new Uint8Array(uncompressed);
+  if (u.length !== 65 || u[0] !== 0x04) throw new Error("not an uncompressed SEC1 point");
+  const out = new Uint8Array(33);
+  // The prefix encodes the parity of Y, which is the parity of its last byte.
+  out[0] = (u[64] & 1) === 0 ? 0x02 : 0x03;
+  out.set(u.subarray(1, 33), 1);
+  return out;
+}
+
+/** Pull `r` and `s` out of a DER SEQUENCE { INTEGER r, INTEGER s }. */
+function derToRs(der) {
+  const b = new Uint8Array(der);
+  let i = 0;
+  const integer = () => {
+    if (b[i++] !== 0x02) throw new Error("expected a DER INTEGER");
+    const len = b[i++];
+    let hex = "";
+    for (let j = 0; j < len; j++) hex += b[i + j].toString(16).padStart(2, "0");
+    i += len;
+    return BigInt("0x" + hex);
+  };
+  if (b[i++] !== 0x30) throw new Error("expected a DER SEQUENCE");
+  i++; // body length: short form for any P-256 signature
+  const r = integer();
+  const s = integer();
+  return { r, s };
+}
 
 $("rpid").value = location.hostname || "localhost";
 
@@ -219,9 +258,20 @@ $("assert").addEventListener("click", async () => {
     const signCount = new DataView(authData.buffer, authData.byteOffset).getUint32(33, false);
     const clientJson = utf8(assertion.response.clientDataJSON);
 
+    const signature = assertion.response.signature;
+    const { s } = derToRs(signature);
+
+    // Every field here is also emitted by tools/make-fixtures.mjs, in the same order, so this
+    // object can be saved straight over a generated fixture. The contract's test loader reads
+    // only the six top-level byte fields and treats everything under `meta` as documentation,
+    // but keeping the two shapes identical means a diff between a capture and a fixture shows
+    // real differences and nothing else.
     const fixture = {
       note: "Captured from a real device by tools/capture-assertion.html. Verifying it proves " +
-            "a human was present at this registered device, not that a unique human was.",
+            "that the holder of this credential signed this exact challenge and that the " +
+            "authenticator asserted user verification. It does not prove the credential is " +
+            "hardware-backed — there is no attestation here — so the guarantee is only as " +
+            "strong as the registration step.",
       credential_id: b64(assertion.rawId),
       pubkey_sec1: stored.pubkey_sec1,
       challenge: b64(challenge),
@@ -229,7 +279,7 @@ $("assert").addEventListener("click", async () => {
       client_data_json: clientJson,
       // An ES256 assertion signature is already DER-encoded SEQUENCE { r, s }. Unlike
       // WebCrypto's subtle.sign, there is nothing to convert here.
-      signature_der: b64(assertion.response.signature),
+      signature_der: b64(signature),
       meta: {
         generated_by: "tools/capture-assertion.html",
         captured_at: new Date().toISOString(),
@@ -242,6 +292,8 @@ $("assert").addEventListener("click", async () => {
         sign_count: signCount,
         signed_challenge: b64(challenge),
         pubkey_sec1_form: "uncompressed (0x04 ‖ X ‖ Y, 65 bytes)",
+        pubkey_sec1_compressed: b64(compressSec1(fromB64(stored.pubkey_sec1))),
+        signature_s_is_high: s > N / 2n,
       },
     };
 

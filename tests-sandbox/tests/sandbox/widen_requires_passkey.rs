@@ -77,9 +77,16 @@ async fn verifying_a_real_assertion_fits_in_gas() -> anyhow::Result<()> {
         (burnt.as_gas().saturating_sub(baseline.as_gas())) as f64 / 1e12
     );
 
+    // 300 TGas is the protocol limit and the figure the design had to clear, but asserting
+    // against it would be theatre: the call above asks for `max_gas()`, so anything that
+    // genuinely exceeded 300 TGas would exhaust its gas and fail `is_success` further up
+    // rather than reach this line. 50 TGas is the real regression guard — comfortably clear
+    // of the measured 33.46, tight enough to catch a change that makes verification half
+    // again as expensive.
     assert!(
-        burnt < Gas::from_tgas(300),
-        "verification burnt {burnt}, which does not fit in a transaction"
+        burnt < Gas::from_tgas(50),
+        "verification burnt {burnt}, over the 50 TGas regression guard (the protocol limit is \
+         300 TGas; this bound is set far below it so a regression shows up here first)"
     );
     Ok(())
 }

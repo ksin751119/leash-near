@@ -1,5 +1,5 @@
 {
-  "note": "A well-formed assertion: user present and user verified, challenge matches. Passing this proves a human was present at this registered device, not that a unique human was.",
+  "note": "A well-formed assertion: user present and user verified, challenge matches. Passing this proves that the holder of this credential signed this exact challenge and that the authenticator asserted user verification. It does not prove the credential is hardware-backed — an assertion carries no attestation at all — so the guarantee is only as strong as the registration step. This key is a software key from a generator script, which is rather the point: the contract cannot tell, and does not claim to.",
   "credential_id": "vxK33cYwejlMTXhPym/+Fw==",
   "pubkey_sec1": "BNVMB+H3Rx6ftWIMZVMnOKn0c3jcPQCyDB3LsElMJL9RFEBlQDe4rm8C8El1E20vddhTsKsQoEQrmL+VhDD+Z1Q=",
   "challenge": "sF/nwa+u8qNWaLPVm8d5sCWfvE7zyKMddGb5X9FXj7Q=",

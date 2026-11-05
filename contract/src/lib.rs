@@ -49,8 +49,14 @@ impl LeashAccount {
     /// place where the cost of the curve arithmetic can be read without the rest of a
     /// transaction's cost mixed in.
     ///
-    /// A `true` here means a human was present at the device that holds this key, nothing
-    /// more. Anything malformed returns `false` rather than panicking.
+    /// A `true` means the holder of this public key signed this exact challenge and the
+    /// authenticator asserted user verification. It does **not** mean the key is
+    /// hardware-backed: this probe takes a public key as an argument, so anyone can pass one
+    /// they minted in a script and get a `true` with no device and no human involved. That is
+    /// not a weakness in the verification — it is where the trust boundary actually sits. See
+    /// the `webauthn` module header.
+    ///
+    /// Anything malformed returns `false` rather than panicking.
     pub fn probe_verify(
         &self,
         pubkey_sec1: Base64VecU8,

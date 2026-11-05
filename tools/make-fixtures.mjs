@@ -277,8 +277,12 @@ const files = [
   await fixture({
     name: "assertion_valid",
     note:
-      "A well-formed assertion: user present and user verified, challenge matches. " +
-      "Passing this proves a human was present at this registered device, not that a unique human was.",
+      "A well-formed assertion: user present and user verified, challenge matches. Passing this " +
+      "proves that the holder of this credential signed this exact challenge and that the " +
+      "authenticator asserted user verification. It does not prove the credential is " +
+      "hardware-backed — an assertion carries no attestation at all — so the guarantee is only " +
+      "as strong as the registration step. This key is a software key from a generator script, " +
+      "which is rather the point: the contract cannot tell, and does not claim to.",
     flags: FLAG_UP | FLAG_UV,
     signCount: 1,
     expectedChallenge: CHALLENGE_A,

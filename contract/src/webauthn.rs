@@ -1,15 +1,33 @@
 //! On-chain verification of a WebAuthn (passkey) assertion.
 //!
-//! What a passing verification proves: **a human was present at a registered device** and
-//! unlocked it, because the authenticator set the UV bit after checking a biometric or the
-//! device PIN. It does not prove a *unique* human. Anyone enrolled on that device — a
-//! partner's fingerprint added to the same phone, a shared household iPad — satisfies it
-//! exactly as well as the owner does. Every claim this project makes about passkeys has to
-//! be worded that way.
+//! # What this proves, exactly
 //!
-//! Why it runs on chain at all: tightening a spending rule is free and immediate, loosening
-//! one requires a human at a registered device. The contract itself checks the signature, so
-//! there is no server, no oracle and no bridge in the trust path.
+//! A passing verification establishes two things and no more:
+//!
+//! 1. the holder of a registered credential signed **this exact challenge**, and
+//! 2. the authenticator asserted **user verification** — the UV bit — at the moment of
+//!    signing.
+//!
+//! It **cannot** establish that the credential is hardware-backed rather than a software
+//! P-256 key. WebAuthn attestation is absent for synced passkeys — iCloud Keychain and
+//! Google Password Manager attest `none` — so nothing reaches this contract that could tell
+//! a secure enclave from a key minted in a script. Nothing in this module distinguishes
+//! them, and nothing here could.
+//!
+//! **The guarantee is therefore only as strong as the registration step: whoever registers a
+//! credential vouches that it is a real authenticator.** Given a credential that genuinely is
+//! one, a passing verification means a human was present at that device and unlocked it with
+//! a biometric or the device PIN — and even then not a *unique* human, because anyone
+//! enrolled on that device satisfies it exactly as well as the owner does.
+//!
+//! Those caveats travel together. "A human was present at a registered device" is not a claim
+//! this code supports on its own, and must never be written without the registration caveat
+//! beside it. "A unique human" is never true here at all.
+//!
+//! Why it runs on chain: tightening a spending rule is free and immediate, loosening one
+//! requires a signature from a registered credential. The contract itself checks that
+//! signature, so there is no server, no oracle and no bridge in the trust path — the trust
+//! that remains sits entirely at registration.
 //!
 //! What this module deliberately does not check:
 //! - **`origin`** and the rpIdHash in `authenticatorData[0..32]`. An authenticator will only
@@ -203,13 +221,17 @@ mod tests {
     const WRONG_CHALLENGE: &str =
         include_str!("../../tests-sandbox/tests/fixtures/assertion_wrong_challenge.json");
 
-    /// One fixture from `tools/make-fixtures.mjs`, decoded. Every byte field in the file is
-    /// standard base64 (what near-sdk's `Base64VecU8` uses on the wire), except
-    /// `client_data_json`, which is the literal JSON string the authenticator signed over.
+    /// One fixture, decoded. Every byte field in the file is standard base64 (what near-sdk's
+    /// `Base64VecU8` uses on the wire), except `client_data_json`, which is the literal JSON
+    /// string the authenticator signed over.
+    ///
+    /// The six fields below are the whole required schema, and they are exactly the fields
+    /// `tools/capture-assertion.html` emits from a real device. Everything under `meta` is
+    /// documentation and is optional, so a capture can be dropped in here as-is — the one
+    /// thing Task 10's preflight depends on, done under time pressure on recording day.
     struct Fixture {
         credential_id: Vec<u8>,
         pubkey_sec1: Vec<u8>,
-        pubkey_sec1_compressed: Vec<u8>,
         challenge: [u8; 32],
         authenticator_data: Vec<u8>,
         client_data_json: String,
@@ -234,52 +256,77 @@ mod tests {
         }
     }
 
-    fn load(text: &str) -> Fixture {
-        let v: Value = near_sdk::serde_json::from_str(text).expect("fixture is not valid JSON");
+    /// Decode a fixture, failing with a message that names the file and the field.
+    ///
+    /// Required fields are required loudly; anything under `meta` is never read. A fixture
+    /// that is missing a required field is a broken fixture and the test run should say which
+    /// one, rather than reporting `called Option::unwrap() on a None value` from inside a
+    /// closure and leaving whoever is capturing from a phone to guess.
+    fn load_named(name: &str, text: &str) -> Fixture {
+        let v: Value = near_sdk::serde_json::from_str(text)
+            .unwrap_or_else(|e| panic!("fixture {name} is not valid JSON: {e}"));
+        let text_field = |key: &str| -> &str {
+            v.get(key)
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("fixture {name} has no string field `{key}`"))
+        };
         let bytes = |key: &str| -> Vec<u8> {
             STANDARD
-                .decode(v[key].as_str().unwrap_or_else(|| panic!("fixture field {key} missing")))
-                .unwrap_or_else(|_| panic!("fixture field {key} is not base64"))
+                .decode(text_field(key))
+                .unwrap_or_else(|e| panic!("fixture {name} field `{key}` is not base64: {e}"))
         };
-        let challenge: [u8; 32] = bytes("challenge")
-            .try_into()
-            .expect("a challenge is 32 bytes");
+        let raw_challenge = bytes("challenge");
+        let challenge: [u8; 32] = raw_challenge.clone().try_into().unwrap_or_else(|_| {
+            panic!(
+                "fixture {name} field `challenge` is {} bytes, expected 32",
+                raw_challenge.len()
+            )
+        });
         Fixture {
             credential_id: bytes("credential_id"),
             pubkey_sec1: bytes("pubkey_sec1"),
-            pubkey_sec1_compressed: STANDARD
-                .decode(v["meta"]["pubkey_sec1_compressed"].as_str().unwrap())
-                .unwrap(),
             challenge,
             authenticator_data: bytes("authenticator_data"),
-            client_data_json: v["client_data_json"].as_str().unwrap().to_string(),
+            client_data_json: text_field("client_data_json").to_string(),
             signature_der: bytes("signature_der"),
         }
+    }
+
+    fn valid() -> Fixture {
+        load_named("assertion_valid.json", VALID)
+    }
+
+    fn uv_clear() -> Fixture {
+        load_named("assertion_uv_clear.json", UV_CLEAR)
+    }
+
+    fn wrong_challenge() -> Fixture {
+        load_named("assertion_wrong_challenge.json", WRONG_CHALLENGE)
     }
 
     // --- the four cases the brief names ------------------------------------------------
 
     #[test]
     fn accepts_a_real_assertion() {
-        assert!(load(VALID).verify().is_ok());
+        assert!(valid().verify().is_ok());
     }
 
     #[test]
     fn rejects_when_uv_bit_clear() {
-        assert_eq!(load(UV_CLEAR).verify(), Err(VerifyError::UserNotVerified));
+        assert_eq!(uv_clear().verify(), Err(VerifyError::UserNotVerified));
     }
 
     #[test]
     fn rejects_challenge_for_another_rule() {
         assert_eq!(
-            load(WRONG_CHALLENGE).verify(),
+            wrong_challenge().verify(),
             Err(VerifyError::ChallengeMismatch)
         );
     }
 
     #[test]
     fn rejects_tampered_signature() {
-        let f = load(VALID);
+        let f = valid();
         // Flip the lowest bit of `s`. The DER stays structurally valid and `s` stays well
         // inside the group order, so this reaches the curve maths and fails there rather
         // than failing to parse.
@@ -301,7 +348,7 @@ mod tests {
 
     #[test]
     fn rejects_a_type_that_is_not_webauthn_get() {
-        let f = load(VALID);
+        let f = valid();
         // A registration ceremony's clientDataJSON replayed as an assertion.
         let client = f.client_data_json.replace("webauthn.get", "webauthn.create");
         assert_eq!(
@@ -318,7 +365,7 @@ mod tests {
 
     #[test]
     fn rejects_authenticator_data_shorter_than_37_bytes() {
-        let f = load(VALID);
+        let f = valid();
         // 36 bytes: rpIdHash and nothing else worth reading. Indexing byte 32 for the UV
         // flag on this would panic, which is why the length check comes first.
         let short = f.authenticator_data[..36].to_vec();
@@ -336,7 +383,7 @@ mod tests {
 
     #[test]
     fn rejects_client_data_that_is_not_json() {
-        let f = load(VALID);
+        let f = valid();
         assert_eq!(
             verify_assertion(
                 &f.cred(),
@@ -351,7 +398,7 @@ mod tests {
 
     #[test]
     fn rejects_a_challenge_that_is_not_base64url() {
-        let f = load(VALID);
+        let f = valid();
         // `!` is in neither base64 alphabet.
         let client = near_sdk::serde_json::json!({
             "type": "webauthn.get",
@@ -373,7 +420,7 @@ mod tests {
 
     #[test]
     fn rejects_client_data_with_no_challenge_field() {
-        let f = load(VALID);
+        let f = valid();
         let client = near_sdk::serde_json::json!({
             "type": "webauthn.get",
             "origin": "https://leash.local",
@@ -393,7 +440,7 @@ mod tests {
 
     #[test]
     fn rejects_a_signature_that_is_not_der() {
-        let f = load(VALID);
+        let f = valid();
         assert_eq!(
             verify_assertion(
                 &f.cred(),
@@ -419,7 +466,7 @@ mod tests {
     /// accept a touch as if it were a Face ID unlock, so pin it.
     #[test]
     fn the_at_bit_does_not_count_as_user_verification() {
-        let f = load(VALID);
+        let f = valid();
         let mut auth = f.authenticator_data.clone();
         auth[32] = 0x41; // UP | AT, UV clear
         assert_eq!(
@@ -436,13 +483,26 @@ mod tests {
 
     /// A compressed SEC1 key is 33 bytes instead of 65 and verifies the same signature, so
     /// a credential can be stored in half the space.
+    ///
+    /// The compressed form is derived here from the fixture's own uncompressed key rather
+    /// than read out of the fixture file. That keeps the required fixture schema down to the
+    /// six fields a real capture carries, and it makes the test stronger: it proves the
+    /// contract accepts the compressed encoding of the very key under test, with no help from
+    /// whatever produced the fixture.
     #[test]
     fn accepts_a_compressed_public_key() {
-        let f = load(VALID);
-        let cred =
-            Credential::try_new(f.credential_id.clone(), f.pubkey_sec1_compressed.clone(), 0)
-                .expect("a compressed SEC1 key should parse");
+        let f = valid();
+        let compressed = VerifyingKey::from_sec1_bytes(&f.pubkey_sec1)
+            .expect("fixture public key should parse")
+            .to_encoded_point(true);
+        let cred = Credential::try_new(
+            f.credential_id.clone(),
+            compressed.as_bytes().to_vec(),
+            0,
+        )
+        .expect("a compressed SEC1 key should parse");
         assert_eq!(cred.pubkey_sec1().len(), 33);
+        assert_eq!(f.pubkey_sec1.len(), 65, "the fixture carries the uncompressed form");
         assert!(verify_assertion(
             &cred,
             &f.challenge,
