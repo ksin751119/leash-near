@@ -11,9 +11,10 @@ cargo build --release --target wasm32-unknown-unknown -p test-token
 
 ## Test
 
-Sandbox tests build the contracts from source and download the NEAR sandbox binary on first run.
+`cargo test` runs every unit and sandbox test in the workspace. Sandbox tests build the contracts from source and download the NEAR sandbox binary on first run. The sandbox tests live in `tests-sandbox/`.
 
 ```bash
+cargo test
 cargo test --test account_is_frozen
 cargo test --test test_token
 ```

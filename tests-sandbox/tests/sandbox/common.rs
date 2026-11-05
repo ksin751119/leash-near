@@ -8,8 +8,9 @@ use near_workspaces::{Account, AccountId, Contract, Worker};
 use std::path::PathBuf;
 use std::process::Command;
 
+/// The workspace root, one level above this crate's manifest.
 fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
 }
 
 /// Build a workspace member to wasm32 (release) and return its bytes.
