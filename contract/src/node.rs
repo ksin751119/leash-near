@@ -17,6 +17,15 @@ mod tests {
     #[test] fn two_agents_share_one_node() {
         assert_eq!(node_of(&"pay.ops.leash.testnet".parse().unwrap()), node_of(&"subs.ops.leash.testnet".parse().unwrap()));
     }
+    #[test] fn different_parents_give_different_nodes() {
+        assert_ne!(node_of(&"pay.ops.leash.testnet".parse().unwrap()), node_of(&"pay.evil.leash.testnet".parse().unwrap()));
+    }
+    #[test] fn suffix_spoof_does_not_share_a_node() {
+        assert_ne!(node_of(&"pay.xops.leash.testnet".parse().unwrap()), node_of(&"pay.ops.leash.testnet".parse().unwrap()));
+    }
+    #[test] fn multi_label_remainder_keeps_all_labels() {
+        assert_eq!(node_of(&"x.y.z".parse().unwrap()), Some("y.z".parse::<AccountId>().unwrap()));
+    }
     #[test] fn refuses_id_without_separator() {
         assert!(node_of(&"alice".parse().unwrap()).is_none());
     }
