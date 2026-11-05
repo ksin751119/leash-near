@@ -37,7 +37,7 @@ account model. Nothing is ported; the primitives are different enough that the d
 | # | Decision | Why | Rejected alternative |
 |---|---|---|---|
 | 1 | **Pure NEAR.** Money and rules both on NEAR. | Two weeks, solo. Chain Signatures adds MPC latency and failure modes to a live demo. | Rules on NEAR, money on Ethereum via Chain Signatures — listed in the README as the next step, not built. |
-| 2 | **Widening a rule requires a passkey signature verified on-chain.** | Keeps the "a human was present" beat from the previous demo without inventing a trust assumption. | World ID: its identity-tree root lives on World Chain and NEAR has no message channel to it; we would have to run the relayer ourselves and the uniqueness claim would rest on our own server. Rejected on honesty grounds. |
+| 2 | **Widening a rule requires a passkey signature verified on-chain.** | Keeps the "a human was present" beat from the previous demo without inventing a trust assumption — qualified by the registration caveat in "What this proves, stated precisely". | World ID: its identity-tree root lives on World Chain and NEAR has no message channel to it; we would have to run the relayer ourselves and the uniqueness claim would rest on our own server. Rejected on honesty grounds. |
 | 3 | **Fallback: 24h timelock on widening.** Decision point **5 Nov**. | On-chain P-256/WebAuthn verification is the one genuinely novel piece of engineering here. It gets built first and it gets a hard abandon date. | Building it last and discovering on 13 Nov that it does not fit in gas. |
 | 4 | **The wallet account holds no full-access key.** | NEAR lets an account delete every full-access key. Code then cannot be redeployed and behaviour is fixed — including against the owner. Money has exactly one exit: `spend`. | Keeping an owner key "just in case", which reduces the claim to "the agent has no permission" — strictly weaker and already done on Ethereum. |
 | 5 | **The budget unit is the agent's parent account.** | Only `ops.leash.testnet` can create `pay.ops.leash.testnet`. Membership of a budget is enforced by the protocol's naming rule, so there is no registry, no binding transaction, and no lookup. | An explicit `bind_agent` registry, i.e. re-implementing on NEAR something NEAR already guarantees. |
@@ -200,11 +200,24 @@ contract:
 
 ### What this proves, stated precisely
 
-It proves **a human was present at a registered device** — someone passed that device's
-biometric or PIN check. It does **not** prove uniqueness, and it does not prove *which*
-human; anyone enrolled on that device can satisfy it. The README and the narration say "a
-human was present", never "a unique human". (The previous project had to delete an unbacked
-claim late in the week; the fix is to never write one.)
+It proves that the holder of a **registered credential** signed this exact challenge, and
+that the authenticator asserted user verification (the UV bit) at signing time — someone
+passed that device's biometric or PIN check.
+
+It does **not** prove uniqueness, and it does not prove *which* human; anyone enrolled on
+that device can satisfy it. It also **cannot prove the credential is hardware-backed**: there
+is no attestation, synced passkeys attest `none`, and a software P-256 key produces a
+signature this contract accepts. A reviewer demonstrated exactly that against our own
+`probe_verify`, with no device and no human.
+
+So the guarantee is only as strong as the **registration step**: whoever registers a
+credential vouches that it is a real authenticator. That makes admin-only credential
+registration a security requirement, not a convenience.
+
+Wording rule: "a human was present" never appears without the registration caveat in the
+same breath, and "a unique human" is never claimed at all. (The previous project had to
+delete an unbacked claim late in the week; the fix is to never write one — including here,
+where the first draft of this very section overclaimed.)
 
 ### Risk gate
 

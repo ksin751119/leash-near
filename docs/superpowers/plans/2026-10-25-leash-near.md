@@ -20,7 +20,7 @@
 - Amounts are `U128` at the token's own decimals (USDC testnet: 6). No floats anywhere.
 - Timestamps use `env::block_timestamp_ms()`; `period_ms` is in milliseconds.
 - Security claims in the README must each name a test. A claim without a test is deleted from the README, not left unproven.
-- Passkey wording is "a human was present", never "a unique human".
+- Passkey wording: "a human was present" NEVER stands alone — the registration caveat appears in the same breath (the contract cannot prove a credential is hardware-backed; the guarantee is only as strong as registration). "A unique human" is never claimed. See the spec's "What this proves, stated precisely".
 - The repo was `git init`-ed on **5 Nov 2026**; every commit lands inside the 1-14 Nov dev window.
 
 ## Review Focus
@@ -529,7 +529,7 @@ Expected: every check green.
 
 - [ ] **Step 3: Write the README**
 
-Each claim followed by the test that proves it, e.g. "the agent key cannot touch the token contract — `tests-sandbox/tests/sandbox/keys.rs::an_agent_key_cannot_call_the_token_contract_directly`". Include the measured gas figure from Task 4, the "a human was present" wording, and the lost-credential caveat.
+Each claim followed by the test that proves it, e.g. "the agent key cannot touch the token contract — `tests-sandbox/tests/sandbox/keys.rs::an_agent_key_cannot_call_the_token_contract_directly`". Include the measured gas figure from Task 4 (33.46 TGas), the passkey wording WITH its registration caveat as the spec states it — never the bare "a human was present" — and the lost-credential caveat.
 
 - [ ] **Step 4: Full test run**
 
