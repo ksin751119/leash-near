@@ -30,6 +30,19 @@ fn acct(s: &str) -> near_sdk::AccountId {
     s.parse().expect("valid account id")
 }
 
+/// The interesting part of a failure, for printing: the `ExecutionError`/`MethodResolveError`
+/// payload without the receipt dump around it.
+fn one_line(msg: &str) -> String {
+    for marker in ["MethodResolveError(", "ExecutionError(\""] {
+        if let Some(i) = msg.find(marker) {
+            let rest = &msg[i + marker.len()..];
+            let end = rest.find(['"', ')']).unwrap_or(rest.len());
+            return format!("{}{}", marker.trim_end_matches(['(', '"']), format!(": {}", &rest[..end]));
+        }
+    }
+    msg.chars().take(160).collect()
+}
+
 /// A rule's JSON, as the contract's own serializer writes it. Going through the contract's
 /// `Rule` type rather than a hand-built object means the test cannot accidentally submit a
 /// field the contract does not have.
@@ -291,7 +304,7 @@ async fn widening_with_replayed_assertion_is_rejected() -> anyhow::Result<()> {
     let msg = why(replay);
     assert!(msg.contains("ChallengeMismatch"), "the replay was refused, but not as a stale challenge: {msg}");
     let stored = rule_of(&fx, NODE).await?.expect("rule is still there");
-    assert_eq!(stored["per_tx_limit"], json!("1000"), "the replay changed the rule");
+    assert_eq!(stored["per_tx_limit"], json!("1000"), "the rule must be unchanged after a refused replay");
     Ok(())
 }
 
@@ -430,7 +443,7 @@ async fn register_credential_is_admin_only() -> anyhow::Result<()> {
     let msg = why(res);
     assert!(msg.contains("only the admin may change rules"), "refused, but not by the admin check: {msg}");
     let ids: Vec<String> = fx.wallet.view("credential_ids").await?.json()?;
-    assert!(ids.is_empty(), "state holds a credential nobody was allowed to add");
+    assert!(ids.is_empty(), "no credential must reach state from a non-admin call");
 
     // The positive half, so this test cannot pass by the method simply not working.
     let admin_key = Passkey::new("admin phone");
@@ -520,7 +533,7 @@ async fn an_agent_function_call_key_cannot_register_a_credential() -> anyhow::Re
     }
 
     let ids: Vec<String> = fx.wallet.view("credential_ids").await?.json()?;
-    assert!(ids.is_empty(), "an agent key got a credential into state");
+    assert!(ids.is_empty(), "no credential must reach state from an agent key");
     Ok(())
 }
 
@@ -786,6 +799,80 @@ async fn a_rule_whose_payee_cannot_be_registered_is_not_applied() -> anyhow::Res
     Ok(())
 }
 
+/// A payee is only registered against the token it was registered on, so changing a rule's
+/// `token` makes every payee need registering again even though the account list is untouched.
+///
+/// `commit_rule` diffs payee accounts, and without this it took the empty-diff early return
+/// and committed with zero deposits: the whole list would then be listed against a token none
+/// of them is registered on, and the first payment would fail for a reason that is not policy
+/// — the exact failure the deposit exists to prevent, reintroduced by the one field nobody
+/// thinks of as a payee change.
+///
+/// A token change is always a widening by `classify`, so this path is gated.
+#[tokio::test]
+async fn changing_the_token_re_registers_every_payee() -> anyhow::Result<()> {
+    let fx = deploy_with_token().await?;
+    let pk = Passkey::new("admin phone");
+    register(&fx, &pk).await?;
+
+    // A second token contract, so the switch is to something real.
+    let other_token = fx.worker.dev_deploy(&build_wasm("test-token")?).await?;
+    other_token
+        .call("new")
+        .args_json(json!({
+            "owner_id": fx.wallet.id(), "total_supply": "1000000000000", "decimals": 6
+        }))
+        .transact()
+        .await?
+        .into_result()?;
+
+    let payees = ["alice.testnet", "carol.testnet"];
+    let first = rule(
+        &fx.token.id().to_string(),
+        1_000,
+        10_000,
+        86_400_000,
+        0,
+        u64::MAX,
+        &payees,
+        false,
+    );
+    set_rule_signed(&fx, &pk, NODE, &first).await?;
+    for p in payees {
+        assert!(is_registered_on_token(&fx, p).await?, "{p} not registered on the first token");
+    }
+
+    // Same payee list, different token.
+    let switched = rule(
+        &other_token.id().to_string(),
+        1_000,
+        10_000,
+        86_400_000,
+        0,
+        u64::MAX,
+        &payees,
+        false,
+    );
+    set_rule_signed(&fx, &pk, NODE, &switched).await?;
+    assert_eq!(
+        rule_of(&fx, NODE).await?.expect("a rule")["token"],
+        json!(other_token.id().to_string())
+    );
+
+    for p in payees {
+        let registered: Option<serde_json::Value> = other_token
+            .view("storage_balance_of")
+            .args_json(json!({ "account_id": p }))
+            .await?
+            .json()?;
+        assert!(
+            registered.is_some(),
+            "{p} is on the list but is not registered on the rule's new token"
+        );
+    }
+    Ok(())
+}
+
 /// A tightening introduces no payee — any addition is a loosening by `classify` — so it has
 /// nothing to register and must stay synchronous. The emergency brake does not wait on
 /// another contract.
@@ -828,7 +915,7 @@ async fn a_rule_introducing_too_many_payees_at_once_is_refused() -> anyhow::Resu
     let res = set_rule(&fx, &fx.admin, NODE, &too_many, Some(a)).await?;
     assert!(res.is_failure(), "nine new payees in one call were accepted: {res:#?}");
     let msg = why(res);
-    assert!(msg.contains("too many new payees"), "refused, but not for the batch size: {msg}");
+    assert!(msg.contains("too many payees to register"), "refused, but not for the batch size: {msg}");
 
     // Eight is the documented bound, and it works.
     let eight: Vec<String> = (0..8).map(|i| format!("p{i}.testnet")).collect();
@@ -927,7 +1014,7 @@ async fn a_failed_storage_deposit_leaves_the_payee_off_the_list() -> anyhow::Res
     assert_eq!(
         payees_of(&fx, NODE).await?,
         Vec::<String>::new(),
-        "the payee was added even though it cannot receive a transfer"
+        "a payee that cannot receive a transfer must not be on the list"
     );
     assert_eq!(
         nonce_of(&fx, &pk).await?,
@@ -1168,7 +1255,7 @@ async fn pausing_the_account_is_free_but_unpausing_needs_a_passkey() -> anyhow::
     assert!(res.is_failure(), "the account was unpaused with no assertion: {res:#?}");
     let msg = why(res);
     assert!(msg.contains("needs a passkey assertion"), "refused, but not by the gate: {msg}");
-    assert!(is_paused(&fx).await?, "a refused unpause took effect anyway");
+    assert!(is_paused(&fx).await?, "a refused unpause must leave the account paused");
 
     let a = sign(&fx, &pk, ACTION_UNPAUSE, &[]).await?;
     set_paused(&fx, &fx.admin, false, Some(a)).await?.into_result()?;
@@ -1222,7 +1309,7 @@ async fn an_add_payee_assertion_cannot_set_a_rule() -> anyhow::Result<()> {
     assert!(res.is_failure(), "an add_payee assertion was accepted by set_rule: {res:#?}");
     let msg = why(res);
     assert!(msg.contains("ChallengeMismatch"), "refused, but not by the action tag: {msg}");
-    assert_eq!(epoch_of(&fx, NODE).await?, Some(0), "the ledger was reset anyway");
+    assert_eq!(epoch_of(&fx, NODE).await?, Some(0), "a refused set_rule must not have reset the ledger");
     Ok(())
 }
 
@@ -1271,6 +1358,114 @@ async fn an_unpause_assertion_cannot_widen_a_rule() -> anyhow::Result<()> {
     let res = set_paused(&fx, &fx.admin, false, Some(a)).await?;
     assert!(res.is_failure(), "a set_rule assertion unpaused the account: {res:#?}");
     assert!(is_paused(&fx).await?);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------
+// The exported surface
+// ---------------------------------------------------------------------------------------
+//
+// In this design `#[private]` means much less than it looks like it means. It checks that
+// the predecessor is this account — and the agent's function-call keys live ON this account,
+// so an agent key arrives with exactly that predecessor and sails straight through. Any
+// state-writing method whose only guard is `#[private]` is therefore reachable by an agent
+// key with no admin check and no assertion.
+//
+// `commit_rule` was such a method, and it takes a rule and a `reset_ledger` flag, so it was
+// an unsigned rule change and a budget wipe behind one access-key method list in a deploy
+// script. The fix is for the exported method not to exist.
+
+/// `commit_rule` must not be an exported contract method at all. Calling it by name has to
+/// fail at method resolution, not at an access check — "the method is not there" is a
+/// property of the compiled wasm, whereas "the caller was rejected" depends on who is asking.
+#[tokio::test]
+async fn commit_rule_is_not_an_exported_method() -> anyhow::Result<()> {
+    let (fx, _pk) = ready().await?;
+    let token = fx.token.id().to_string();
+    let anything = rule(&token, u128::MAX, u128::MAX, 1, 0, u64::MAX, &["attacker.testnet"], false);
+
+    // The arguments `commit_rule` used to take, from an account that is not the admin.
+    let stranger = fx.worker.dev_create_account().await?;
+    let res = stranger
+        .call(fx.wallet.id(), "commit_rule")
+        .args_json(json!({ "node": NODE, "rule": rule_json(&anything), "reset_ledger": true }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(res.is_failure(), "commit_rule is still callable: {res:#?}");
+    let msg = why(res);
+    assert!(
+        msg.contains("MethodNotFound"),
+        "commit_rule still exists as a method and was refused some other way: {msg}"
+    );
+    // Printed so the reason is visible in the test output, not just asserted on.
+    println!("calling commit_rule by name: {}", one_line(&msg));
+
+    // And nothing moved.
+    let stored = rule_of(&fx, NODE).await?.expect("the rule is still there");
+    assert_eq!(stored["per_tx_limit"], json!("1000"));
+    assert_eq!(epoch_of(&fx, NODE).await?, Some(0));
+    Ok(())
+}
+
+/// `on_payees_registered` is the one method that must stay exported, because it is a promise
+/// target — so it is the one place `#[private]` is load-bearing, and `#[private]` alone is not
+/// enough. It is paired with a check that the promise results it was told to expect are
+/// actually present. A direct function call has none, and a function-call access key cannot
+/// build a promise chain, so there is no way to fake one.
+///
+/// This test uses a key on the wallet account, which is the strongest form: `#[private]`
+/// passes for it, so what rejects the call is the callback check and nothing else.
+#[tokio::test]
+async fn on_payees_registered_cannot_be_driven_by_an_agent_key() -> anyhow::Result<()> {
+    let (fx, _pk) = ready().await?;
+    let token = fx.token.id().to_string();
+    let anything = rule(&token, u128::MAX, u128::MAX, 1, 0, u64::MAX, &["attacker.testnet"], false);
+
+    // A deliberately over-broad function-call key on the wallet account, so the call reaches
+    // the contract and `#[private]` is satisfied by it.
+    let sk = SecretKey::from_random(near_workspaces::types::KeyType::ED25519);
+    fx.wallet
+        .batch()
+        .add_key(
+            sk.public_key(),
+            AccessKey::function_call_access(fx.wallet.id(), &["spend", "on_payees_registered"], None),
+        )
+        .transact()
+        .await?
+        .into_result()?;
+    let agent = Account::from_secret_key(fx.wallet.id().clone(), sk, &fx.worker);
+
+    // Both ways an attacker would try it: claim no deposits so the result loop is skipped,
+    // or claim one and supply none.
+    for deposits in [0u64, 1] {
+        let res = agent
+            .call(fx.wallet.id(), "on_payees_registered")
+            .args_json(json!({
+                "node": NODE,
+                "rule": rule_json(&anything),
+                "version": 0,
+                "reset_ledger": true,
+                "deposits": deposits,
+            }))
+            .max_gas()
+            .transact()
+            .await?;
+        assert!(
+            res.is_failure(),
+            "an agent key drove the callback with deposits={deposits}: {res:#?}"
+        );
+        let msg = why(res);
+        assert!(
+            msg.contains("not callable directly"),
+            "refused with deposits={deposits}, but not by the callback check: {msg}"
+        );
+        println!("agent key calling on_payees_registered (deposits={deposits}): {}", one_line(&msg));
+    }
+
+    let stored = rule_of(&fx, NODE).await?.expect("the rule is still there");
+    assert_eq!(stored["per_tx_limit"], json!("1000"), "the rule must be unchanged");
+    assert_eq!(epoch_of(&fx, NODE).await?, Some(0), "the ledger must not have been reset");
     Ok(())
 }
 

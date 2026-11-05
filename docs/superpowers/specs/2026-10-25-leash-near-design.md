@@ -141,6 +141,14 @@ invariant in `add_payee` only, which left every rule set through `set_rule` carr
 could not receive a transfer. A tightening can never introduce a payee (any addition is a
 loosening by `classify`), so the emergency brake still applies synchronously.
 
+A payee counts as registered only **against the token it was registered on**, so changing a
+rule's `token` makes every payee need registering again even though the account list is
+untouched. A diff over payee accounts alone misses that and commits with no deposits at all,
+leaving the whole list against a token none of them is registered on. `changing_the_token_re_
+registers_every_payee` pins it. (One operational consequence: switching the token on a node with
+more than `MAX_NEW_PAYEES_PER_CALL` payees needs the list trimmed first, because every one of
+them has to be re-registered in that call.)
+
 Pinned by `every_payee_on_the_list_is_registered_whichever_path_added_it`,
 `a_rule_whose_payee_cannot_be_registered_is_not_applied`,
 `a_failed_storage_deposit_leaves_the_payee_off_the_list` and
@@ -304,6 +312,23 @@ signature this contract accepts. A reviewer demonstrated exactly that against ou
 So the guarantee is only as strong as the **registration step**: whoever registers a
 credential vouches that it is a real authenticator. That makes admin-only credential
 registration a security requirement, not a convenience.
+
+### `#[private]` is not an authorisation check in this design
+
+near-sdk's `#[private]` checks that the predecessor is the contract's own account. **The
+agent's function-call keys live on that same account**, so a key there arrives with exactly
+that predecessor and passes. Any state-writing method whose only guard is `#[private]` is
+therefore reachable by an agent key, with no admin check and no assertion, stopped only by the
+`method_names` list on the key — a defence that lives in a deploy script rather than in the
+contract.
+
+So: a state-writing method that is not a promise target must not be an exported contract
+method at all (keep it out of the `#[near]` impl), and the one that must be exported —
+`on_payees_registered` — pairs `#[private]` with a check that the promise results it was told
+to expect are actually present. A direct call has none, and a function-call access key cannot
+build a promise chain. `commit_rule_is_not_an_exported_method` and
+`on_payees_registered_cannot_be_driven_by_an_agent_key` pin both halves, and the `#[near]`
+impl carries a table of every `&mut self` method and what guards it.
 
 Wording rule: "a human was present" never appears without the registration caveat in the
 same breath, and "a unique human" is never claimed at all. (The previous project had to

@@ -62,6 +62,33 @@ pub struct LeashAccount {
     state: State,
 }
 
+/// The exported contract surface.
+///
+/// # Audit: what guards each state-writing method
+///
+/// `#[private]` is weaker here than it looks. It checks that the predecessor is this account,
+/// and in this design the agent's function-call keys live **on this account** — so a key here
+/// arrives with exactly that predecessor and passes. A `&mut self` method whose only guard is
+/// `#[private]` is therefore reachable by an agent key, with no admin check and no assertion.
+/// Review found `commit_rule` in exactly that state; it is now outside this block, so the
+/// exported method does not exist.
+///
+/// Every `&mut self` method in this block, and what actually stops an agent key:
+///
+/// | Method | Guard |
+/// | --- | --- |
+/// | `new` | `#[init]` without `ignore_state`, so it cannot re-run on a live account |
+/// | `register_credential` | `assert_admin` |
+/// | `remove_credential` | `assert_admin` |
+/// | `set_rule` | `assert_admin`, plus the passkey gate on a loosening |
+/// | `add_payee` | `assert_admin`, plus the passkey gate |
+/// | `remove_payee` | `assert_admin` |
+/// | `set_paused` | `assert_admin`, plus the passkey gate on unpausing |
+/// | `on_payees_registered` | `#[private]` **and** a check that the promise results it was told to expect are present — see its own doc comment |
+///
+/// Everything else here takes `&self` and writes nothing. `on_payees_registered` is the only
+/// place `#[private]` is load-bearing, and the only place it must be, because it is the only
+/// promise target. Anything added to this block that writes state belongs in that table.
 #[near]
 impl LeashAccount {
     #[init]
@@ -328,77 +355,6 @@ impl LeashAccount {
         }
     }
 
-    /// Commit a rule for `node`, registering any payee it introduces on the token first.
-    /// Returns whether the rule was applied.
-    ///
-    /// Why a callback at all: NEP-141 `ft_transfer` fails for a receiver with no storage
-    /// deposit on the token, so a payee that is on the allow-list but not registered would
-    /// make a legitimate payment fail for a reason that has nothing to do with policy — which
-    /// on recording day reads as a broken product, not a policy decision. So the invariant is
-    /// **"on the list" means "can be paid"**, and it holds on every path that writes a payee.
-    ///
-    /// An earlier version enforced it in `add_payee` only, while `set_rule` wrote any payee
-    /// list it liked with no registration at all. Both paths go through here now.
-    ///
-    /// All-or-nothing: if any deposit fails the rule is not applied at all, so the list never
-    /// contains a payee that cannot receive a transfer. Deposits that did succeed stay
-    /// registered on the token — 0.00125 NEAR for an account that is not on the list, which is
-    /// harmless and leaves no contract state orphaned.
-    ///
-    /// Nothing is written before the dispatch, so a failure has nothing to roll back. The
-    /// assertion's nonce is already spent by the time this is called and is never given back:
-    /// a nonce that could be un-spent is a replay window. The admin retries with a fresh one.
-    #[private]
-    pub fn commit_rule(
-        &mut self,
-        node: AccountId,
-        rule: Rule,
-        reset_ledger: bool,
-    ) -> PromiseOrValue<bool> {
-        let already: Vec<AccountId> = self
-            .state
-            .rule_of(&node)
-            .map(|r| r.payees().to_vec())
-            .unwrap_or_default();
-        let new_payees: Vec<AccountId> = rule
-            .payees()
-            .iter()
-            .filter(|p| !already.contains(p))
-            .cloned()
-            .collect();
-
-        if new_payees.is_empty() {
-            self.state
-                .put_rule(&node, rule, reset_ledger, env::block_timestamp_ms());
-            return PromiseOrValue::Value(true);
-        }
-        require!(
-            new_payees.len() <= MAX_NEW_PAYEES_PER_CALL,
-            "too many new payees in one call; add them in smaller batches"
-        );
-
-        let token = rule.token().clone();
-        let mut deposits = ext_ft::ext(token.clone())
-            .with_attached_deposit(PAYEE_STORAGE_DEPOSIT)
-            .with_static_gas(STORAGE_DEPOSIT_GAS)
-            .storage_deposit(Some(new_payees[0].clone()));
-        for payee in &new_payees[1..] {
-            deposits = deposits.and(
-                ext_ft::ext(token.clone())
-                    .with_attached_deposit(PAYEE_STORAGE_DEPOSIT)
-                    .with_static_gas(STORAGE_DEPOSIT_GAS)
-                    .storage_deposit(Some(payee.clone())),
-            );
-        }
-
-        let version = self.state.version_of(&node);
-        PromiseOrValue::Promise(deposits.then(
-            Self::ext(env::current_account_id())
-                .with_static_gas(COMMIT_CALLBACK_GAS)
-                .on_payees_registered(node, rule, version, reset_ledger),
-        ))
-    }
-
     /// Settle `commit_rule`. Returns whether the rule was applied.
     ///
     /// Two ways this applies nothing and says so rather than panicking: a `storage_deposit`
@@ -406,9 +362,23 @@ impl LeashAccount {
     /// the assertion was verified against is no longer the current one. In both cases the
     /// admin must retry with a fresh assertion — the old one's nonce is spent.
     ///
-    /// `rule` comes back through the promise as the contract's own bytes, not a caller's, and
-    /// `#[private]` means only this contract can call this method. It is re-parsed from JSON
-    /// on the way in, so it is normalised again regardless.
+    /// # Why `#[private]` is not enough here
+    ///
+    /// This is the one method in the contract that must stay exported, because it is a promise
+    /// target. It is also the one place where `#[private]` is load-bearing — and in *this*
+    /// design `#[private]` means less than it looks like it means. It checks that the
+    /// predecessor is this account, and the agent's function-call keys live **on this
+    /// account**, so an agent key arrives with exactly that predecessor. On its own,
+    /// `#[private]` would let any key on the wallet account call this with an arbitrary rule
+    /// and `reset_ledger: true` — an unsigned rule change and a budget wipe.
+    ///
+    /// So it is paired with a check that this really is a callback: `deposits` is how many
+    /// `storage_deposit` promises `commit_rule` dispatched, and the promise results actually
+    /// present must match. A direct function call has none, and a function-call access key
+    /// cannot build a promise chain, so there is no way to fake one.
+    ///
+    /// `rule` arrives through the promise as the contract's own bytes rather than a caller's,
+    /// and is re-parsed from JSON on the way in, so it is normalised again regardless.
     #[private]
     pub fn on_payees_registered(
         &mut self,
@@ -416,8 +386,12 @@ impl LeashAccount {
         rule: Rule,
         version: Option<u64>,
         reset_ledger: bool,
+        deposits: u64,
     ) -> bool {
-        let deposits = env::promise_results_count();
+        require!(
+            deposits > 0 && env::promise_results_count() == deposits,
+            "this method is a callback; it is not callable directly"
+        );
         for i in 0..deposits {
             // The return value is of no interest — only whether the deposit went through.
             // A `TooLong` therefore counts as success: the promise succeeded and merely
@@ -604,8 +578,108 @@ impl LeashAccount {
     }
 }
 
-/// Internal helpers. Outside the `#[near]` block, so none of these is callable.
+/// Internal helpers. Outside the `#[near]` block, so none of these is an exported contract
+/// method — which for anything that writes state is the only reliable protection in this
+/// design. See `commit_rule` and `on_payees_registered` for why `#[private]` is not.
 impl LeashAccount {
+    /// Commit a rule for `node`, registering any payee it introduces on the token first.
+    /// Returns whether the rule was applied.
+    ///
+    /// **Not in the `#[near]` impl, deliberately.** It used to be, guarded by `#[private]`,
+    /// which was a hole: `#[private]` only checks that the predecessor is this account, and in
+    /// this design the agent's function-call keys live on this account. So
+    /// `commit_rule(node, any_rule, reset_ledger: true)` was an exported method reachable by
+    /// an agent key with no `assert_admin` and no assertion — an arbitrary rule and a budget
+    /// wipe. The only thing stopping it was the `method_names = ["spend"]` restriction on the
+    /// key, which is a real defence but lived in a deploy script, one typo away from gone.
+    /// It is never a promise target, so the fix is for the exported method not to exist at
+    /// all. `commit_rule_is_not_an_exported_method` pins that.
+    ///
+    /// Why a callback at all: NEP-141 `ft_transfer` fails for a receiver with no storage
+    /// deposit on the token, so a payee that is on the allow-list but not registered would
+    /// make a legitimate payment fail for a reason that has nothing to do with policy — which
+    /// on recording day reads as a broken product, not a policy decision. So the invariant is
+    /// **"on the list" means "can be paid, with this rule's token"**, and it holds on every
+    /// path that writes a payee.
+    ///
+    /// An earlier version enforced it in `add_payee` only, while `set_rule` wrote any payee
+    /// list it liked with no registration at all. Both paths go through here now.
+    ///
+    /// All-or-nothing: if any deposit fails the rule is not applied at all, so the list never
+    /// contains a payee that cannot receive a transfer. Deposits that did succeed stay
+    /// registered on the token — 0.00125 NEAR for an account that is not on the list, which is
+    /// harmless and leaves no contract state orphaned.
+    ///
+    /// Nothing is written before the dispatch, so a failure has nothing to roll back. The
+    /// assertion's nonce is already spent by the time this is called and is never given back:
+    /// a nonce that could be un-spent is a replay window. The admin retries with a fresh one.
+    fn commit_rule(
+        &mut self,
+        node: AccountId,
+        rule: Rule,
+        reset_ledger: bool,
+    ) -> PromiseOrValue<bool> {
+        let stored = self.state.rule_of(&node);
+        // A payee is "already registered" only against the token it was registered on. A rule
+        // change that switches `token` therefore makes every payee new again, even though the
+        // account list is untouched: a storage deposit on the old token says nothing about the
+        // new one, and without this the whole list would end up unregistered and the first
+        // payment would fail for a reason that is not policy. (A token change is always a
+        // widening by `classify`, so this path is gated.)
+        let same_token = stored
+            .as_ref()
+            .is_some_and(|prev| prev.token() == rule.token());
+        let already: Vec<AccountId> = if same_token {
+            stored.map(|r| r.payees().to_vec()).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let new_payees: Vec<AccountId> = rule
+            .payees()
+            .iter()
+            .filter(|p| !already.contains(p))
+            .cloned()
+            .collect();
+
+        if new_payees.is_empty() {
+            self.state
+                .put_rule(&node, rule, reset_ledger, env::block_timestamp_ms());
+            return PromiseOrValue::Value(true);
+        }
+        require!(
+            new_payees.len() <= MAX_NEW_PAYEES_PER_CALL,
+            "too many payees to register in one call; add them in smaller batches (note that \
+             changing a rule's token makes every payee need registering again)"
+        );
+
+        let token = rule.token().clone();
+        let mut deposits = ext_ft::ext(token.clone())
+            .with_attached_deposit(PAYEE_STORAGE_DEPOSIT)
+            .with_static_gas(STORAGE_DEPOSIT_GAS)
+            .storage_deposit(Some(new_payees[0].clone()));
+        for payee in &new_payees[1..] {
+            deposits = deposits.and(
+                ext_ft::ext(token.clone())
+                    .with_attached_deposit(PAYEE_STORAGE_DEPOSIT)
+                    .with_static_gas(STORAGE_DEPOSIT_GAS)
+                    .storage_deposit(Some(payee.clone())),
+            );
+        }
+
+        let version = self.state.version_of(&node);
+        PromiseOrValue::Promise(deposits.then(
+            Self::ext(env::current_account_id())
+                .with_static_gas(COMMIT_CALLBACK_GAS)
+                .on_payees_registered(
+                    node,
+                    rule,
+                    version,
+                    reset_ledger,
+                    new_payees.len() as u64,
+                ),
+        ))
+    }
+
     /// Every method in this task is an ADMIN operation, so every one of them starts here.
     ///
     /// `predecessor_account_id`, not `signer_account_id`: the predecessor is who called us,
