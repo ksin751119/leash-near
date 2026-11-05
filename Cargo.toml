@@ -10,7 +10,9 @@ publish = false
 
 [dev-dependencies]
 anyhow = "1"
-# no system OpenSSL on this box; near-jsonrpc-client pulls native-tls, so build OpenSSL from source
+# near-workspaces 0.24 depends on near-jsonrpc-client 0.23 without default-features = false,
+# and that crate defaults to native-tls, so OpenSSL is needed on any machine without system
+# headers. Vendoring builds it from source.
 openssl = { version = "0.10", features = ["vendored"] }
 near-workspaces = "0.24"
 serde_json = "1"

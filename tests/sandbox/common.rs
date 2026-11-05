@@ -3,8 +3,8 @@
 #![allow(dead_code)]
 
 use near_workspaces::network::Sandbox;
-use near_workspaces::types::AccessKeyPermission;
-use near_workspaces::{AccountId, Contract, Worker};
+use near_workspaces::types::{AccessKey, AccessKeyPermission, SecretKey};
+use near_workspaces::{Account, AccountId, Contract, Worker};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -74,4 +74,36 @@ pub async fn deploy_and_freeze() -> anyhow::Result<(Worker<Sandbox>, Contract)> 
             .into_result()?;
     }
     Ok((worker, wallet))
+}
+
+/// Like `deploy_and_freeze`, but first adds a function-call key for `spend` (the agent
+/// key) and returns an `Account` signing with it. The key still exists after the freeze.
+pub async fn deploy_and_freeze_with_agent_key(
+) -> anyhow::Result<(Worker<Sandbox>, Contract, Account)> {
+    let (worker, wallet) = deploy().await?;
+    let agent_sk = SecretKey::from_random(near_workspaces::types::KeyType::ED25519);
+    wallet
+        .batch()
+        .add_key(
+            agent_sk.public_key(),
+            AccessKey::function_call_access(wallet.id(), &["spend"], None),
+        )
+        .transact()
+        .await?
+        .into_result()?;
+    for k in worker
+        .view_access_keys(wallet.id())
+        .await?
+        .iter()
+        .filter(|k| matches!(k.access_key.permission, AccessKeyPermission::FullAccess))
+    {
+        wallet
+            .batch()
+            .delete_key(k.public_key.clone())
+            .transact()
+            .await?
+            .into_result()?;
+    }
+    let agent = Account::from_secret_key(wallet.id().clone(), agent_sk, &worker);
+    Ok((worker, wallet, agent))
 }
