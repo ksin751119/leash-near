@@ -1,3 +1,5 @@
+mod node;
+
 use near_sdk::{near, AccountId, PanicOnDefault};
 
 /// The wallet account's contract. The account that hosts it has its full-access keys
