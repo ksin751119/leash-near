@@ -186,6 +186,9 @@ mod tests {
     #[test] fn removing_a_payee_is_tightening() {
         assert_eq!(classify(&base(), &base().with_payees(&["a.testnet"])), Change::Tightening);
     }
+    #[test] fn swapping_a_payee_is_widening() {
+        assert_eq!(classify(&base(), &base().with_payees(&["a.testnet", "c.testnet"])), Change::Widening);
+    }
     #[test] fn shorter_period_is_widening() {
         assert_eq!(classify(&base(), &base().with_period_ms(86_399_999)), Change::Widening);
     }
@@ -228,19 +231,25 @@ mod tests {
     // Exhaustive guard: every comparator must react to its own field and to no other.
     // Returns (current, proposed) where only `field` loosens, or None if the field has no
     // tightened direction.
-    fn loosened(field: &str) -> (Rule, Rule) {
+    fn loosened(field: &str) -> Vec<(Rule, Rule)> {
         let b = base();
-        match field {
+        if field == "payees" {
+            // append, and swap a member for a stranger at the same list length
+            return vec![
+                (b.clone(), b.clone().with_payees(&["a.testnet", "b.testnet", "c.testnet"])),
+                (b.clone(), b.with_payees(&["a.testnet", "c.testnet"])),
+            ];
+        }
+        vec![match field {
             "token" => (b.clone(), b.with_token("other.testnet")),
             "per_tx_limit" => (b.clone(), b.with_per_tx(101)),
             "period_limit" => (b.clone(), b.with_period_limit(1_001)),
             "period_ms" => (b.clone(), b.with_period_ms(86_399_999)),
             "window_start_ms" => (b.clone(), b.with_window(999, 9_000)),
             "window_end_ms" => (b.clone(), b.with_window(1_000, 9_001)),
-            "payees" => (b.clone(), b.with_payees(&["a.testnet", "b.testnet", "c.testnet"])),
             "paused" => (b.clone().with_paused(true), b),
             other => panic!("no loosening case for field {other}: add one"),
-        }
+        }]
     }
     fn tightened(field: &str) -> Option<(Rule, Rule)> {
         let b = base();
@@ -261,10 +270,11 @@ mod tests {
     }
     fn check_table(table: &[Comparator]) -> Result<(), String> {
         for entry in table {
-            let (c, p) = loosened(entry.field);
-            let got = fired(table, &c, &p);
-            if got != vec![entry.field] {
-                return Err(format!("loosening only {} fired {:?}", entry.field, got));
+            for (c, p) in loosened(entry.field) {
+                let got = fired(table, &c, &p);
+                if got != vec![entry.field] {
+                    return Err(format!("loosening only {} fired {:?}", entry.field, got));
+                }
             }
             if let Some((c, p)) = tightened(entry.field) {
                 let got = fired(table, &c, &p);
