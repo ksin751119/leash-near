@@ -1375,6 +1375,58 @@ async fn an_unpause_assertion_cannot_widen_a_rule() -> anyhow::Result<()> {
 // an unsigned rule change and a budget wipe behind one access-key method list in a deploy
 // script. The fix is for the exported method not to exist.
 
+/// The premise the whole guard story rests on: the admin is a **different account** from the
+/// wallet.
+///
+/// `assert_admin` compares the predecessor against the stored admin, and the agent's
+/// function-call keys live on the wallet account — so a call made with one arrives with the
+/// predecessor set to the wallet. If the admin were the wallet, every admin check in the
+/// contract would succeed for an agent key: no gate, no passkey, an agent setting its own
+/// rules. Same class of mistake as relying on `#[private]` here, and the last place the
+/// premise could have been broken.
+///
+/// Refused at initialisation, so a deployment cannot be in that state at all.
+#[tokio::test]
+async fn the_admin_may_not_be_the_wallet_account() -> anyhow::Result<()> {
+    let worker = near_workspaces::sandbox().await?;
+    let wallet = worker.dev_deploy(&common::wasm()?).await?;
+    let token: near_workspaces::AccountId = format!("usdc.{}", worker.root_account()?.id()).parse()?;
+
+    let res = wallet
+        .call("new")
+        .args_json(json!({ "admin": wallet.id(), "token": token }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(res.is_failure(), "the wallet was initialised as its own admin: {res:#?}");
+    let msg = why(res);
+    assert!(
+        msg.contains("admin must be a different account from the wallet"),
+        "refused, but not for admin == wallet: {msg}"
+    );
+    println!("initialising with admin == wallet: {}", one_line(&msg));
+
+    // The contract really is uninitialised, not half-initialised: a view call panics on the
+    // missing state rather than reporting an admin.
+    let read = wallet.view("get_admin").await;
+    assert!(read.is_err(), "state exists after a refused initialisation");
+
+    // And a different admin works, so this test cannot pass by `new` simply being broken.
+    let admin = worker.dev_create_account().await?;
+    wallet
+        .call("new")
+        .args_json(json!({ "admin": admin.id(), "token": token }))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    assert_eq!(
+        wallet.view("get_admin").await?.json::<String>()?,
+        admin.id().to_string()
+    );
+    Ok(())
+}
+
 /// `commit_rule` must not be an exported contract method at all. Calling it by name has to
 /// fail at method resolution, not at an access check — "the method is not there" is a
 /// property of the compiled wasm, whereas "the caller was rejected" depends on who is asking.

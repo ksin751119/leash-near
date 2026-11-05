@@ -330,6 +330,18 @@ build a promise chain. `commit_rule_is_not_an_exported_method` and
 `on_payees_registered_cannot_be_driven_by_an_agent_key` pin both halves, and the `#[near]`
 impl carries a table of every `&mut self` method and what guards it.
 
+### The admin must be a different account from the wallet
+
+Same root cause, stated as the premise it is. Every gated method is guarded by `assert_admin`,
+which compares the predecessor against the stored admin — and the agent's keys live on the
+wallet account. **An admin equal to the wallet would make every one of those checks succeed for
+an agent key**, taking the passkey gate with it: an agent could set its own rules. The whole
+guard story depends on the two being different accounts.
+
+`new` refuses it, so no deployment can be in that state, and `scripts/deploy.sh` refuses it
+before building anything so the failure does not arrive as a half-finished deploy.
+`the_admin_may_not_be_the_wallet_account` pins the contract half.
+
 Wording rule: "a human was present" never appears without the registration caveat in the
 same breath, and "a unique human" is never claimed at all. (The previous project had to
 delete an unbacked claim late in the week; the fix is to never write one — including here,

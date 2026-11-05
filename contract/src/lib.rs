@@ -77,7 +77,7 @@ pub struct LeashAccount {
 ///
 /// | Method | Guard |
 /// | --- | --- |
-/// | `new` | `#[init]` without `ignore_state`, so it cannot re-run on a live account |
+/// | `new` | `#[init]` without `ignore_state`, so it cannot re-run on a live account; and it refuses an `admin` equal to this account, which would make every `assert_admin` below vacuous |
 /// | `register_credential` | `assert_admin` |
 /// | `remove_credential` | `assert_admin` |
 /// | `set_rule` | `assert_admin`, plus the passkey gate on a loosening |
@@ -91,8 +91,29 @@ pub struct LeashAccount {
 /// promise target. Anything added to this block that writes state belongs in that table.
 #[near]
 impl LeashAccount {
+    /// Initialise the wallet.
+    ///
+    /// **`admin` must be an account whose keys are not on this one, and that is a security
+    /// requirement rather than a convention.** Every gated method in this contract is guarded
+    /// by `assert_admin`, which compares `env::predecessor_account_id()` against the stored
+    /// admin. The agent's function-call keys live **on this account**, so calls made with one
+    /// arrive with the predecessor set to this account — and if the admin were this account,
+    /// every one of those comparisons would succeed for an agent key. `assert_admin` would
+    /// stop protecting anything, and the passkey gate with it: an agent could set its own
+    /// rules.
+    ///
+    /// That is the same mistake as relying on `#[private]` here (see the audit table on this
+    /// impl block), and it is the last place the premise could have been broken, so it is
+    /// refused at the door rather than left to a deploy script. `scripts/deploy.sh` refuses it
+    /// too, so the failure arrives before anything is deployed.
     #[init]
     pub fn new(admin: AccountId, token: AccountId) -> Self {
+        require!(
+            admin != env::current_account_id(),
+            "admin must be a different account from the wallet: the agent's function-call keys \
+             live on the wallet account, so an admin equal to it would let an agent key satisfy \
+             every admin check"
+        );
         Self {
             admin,
             token,
