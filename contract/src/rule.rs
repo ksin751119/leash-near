@@ -28,9 +28,10 @@ struct RuleInput {
     paused: bool,
 }
 
-impl From<RuleInput> for Rule {
-    fn from(i: RuleInput) -> Self {
-        Rule::new(i.token, i.per_tx_limit, i.period_limit, i.period_ms, i.window_start_ms, i.window_end_ms, i.payees, i.paused)
+impl TryFrom<RuleInput> for Rule {
+    type Error = String;
+    fn try_from(i: RuleInput) -> Result<Self, String> {
+        Rule::try_new(i.token, i.per_tx_limit, i.period_limit, i.period_ms, i.window_start_ms, i.window_end_ms, i.payees, i.paused)
     }
 }
 
@@ -38,9 +39,16 @@ impl From<RuleInput> for Rule {
 /// passkey signs are exactly the bytes the caller submitted.
 ///
 /// Canonical form: `payees` is sorted and has no duplicates. Fields are private so the only
-/// ways to get a `Rule` are `new` and JSON deserialisation, and both normalise.
+/// ways to get a `Rule` are `try_new` and JSON deserialisation, and both normalise and validate.
+///
+/// Meanings pinned by the project (each has a test; all fail closed):
+/// - `window_start_ms > window_end_ms` is invalid and rejected. "No window restriction" is the
+///   explicit sentinel `window_start_ms = 0, window_end_ms = u64::MAX`.
+/// - `period_ms == 0` is invalid and rejected (the period bucket is `now_ms / period_ms`).
+/// - An empty `payees` list means pay nobody, never "any payee".
+/// - `per_tx_limit == 0` and `period_limit == 0` mean zero allowed, never "unlimited".
 #[near(serializers = [borsh, json])]
-#[serde(from = "RuleInput")]
+#[serde(try_from = "RuleInput")]
 #[derive(Clone, PartialEq, Debug)]
 pub struct Rule {
     token: AccountId,
@@ -57,7 +65,7 @@ pub struct Rule {
 
 impl Rule {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn try_new(
         token: AccountId,
         per_tx_limit: u128,
         period_limit: u128,
@@ -66,10 +74,16 @@ impl Rule {
         window_end_ms: u64,
         mut payees: Vec<AccountId>,
         paused: bool,
-    ) -> Self {
+    ) -> Result<Self, String> {
+        if period_ms == 0 {
+            return Err("period_ms must be greater than zero".into());
+        }
+        if window_start_ms > window_end_ms {
+            return Err("window_start_ms must not be after window_end_ms".into());
+        }
         payees.sort();
         payees.dedup();
-        Self { token, per_tx_limit, period_limit, period_ms, window_start_ms, window_end_ms, payees, paused }
+        Ok(Self { token, per_tx_limit, period_limit, period_ms, window_start_ms, window_end_ms, payees, paused })
     }
 }
 
@@ -122,7 +136,7 @@ mod tests {
     fn acct(s: &str) -> AccountId { s.parse().unwrap() }
 
     fn base() -> Rule {
-        Rule::new(acct("usdc.testnet"), 100, 1_000, 86_400_000, 1_000, 9_000, vec![acct("a.testnet"), acct("b.testnet")], false)
+        Rule::try_new(acct("usdc.testnet"), 100, 1_000, 86_400_000, 1_000, 9_000, vec![acct("a.testnet"), acct("b.testnet")], false).unwrap()
     }
 
     impl Rule {
@@ -138,72 +152,27 @@ mod tests {
     #[test] fn identical_rule_is_tightening() {
         assert_eq!(classify(&base(), &base()), Change::Tightening);
     }
-    #[test] fn higher_per_tx_limit_is_widening() {
-        assert_eq!(classify(&base(), &base().with_per_tx(101)), Change::Widening);
-    }
-    #[test] fn lower_per_tx_limit_is_tightening() {
-        assert_eq!(classify(&base(), &base().with_per_tx(99)), Change::Tightening);
-    }
-    #[test] fn higher_period_limit_is_widening() {
-        assert_eq!(classify(&base(), &base().with_period_limit(1_001)), Change::Widening);
-    }
-    #[test] fn lower_period_limit_is_tightening() {
-        assert_eq!(classify(&base(), &base().with_period_limit(999)), Change::Tightening);
-    }
-    #[test] fn shorter_period_is_widening() {
-        assert_eq!(classify(&base(), &base().with_period_ms(86_399_999)), Change::Widening);
-    }
-    #[test] fn longer_period_is_tightening() {
-        assert_eq!(classify(&base(), &base().with_period_ms(86_400_001)), Change::Tightening);
-    }
-    #[test] fn earlier_window_start_is_widening() {
-        assert_eq!(classify(&base(), &base().with_window(999, 9_000)), Change::Widening);
-    }
-    #[test] fn later_window_end_is_widening() {
-        assert_eq!(classify(&base(), &base().with_window(1_000, 9_001)), Change::Widening);
-    }
-    #[test] fn narrower_window_is_tightening() {
-        assert_eq!(classify(&base(), &base().with_window(1_001, 8_999)), Change::Tightening);
-    }
-    #[test] fn adding_a_payee_is_widening() {
-        assert_eq!(classify(&base(), &base().with_payees(&["a.testnet", "b.testnet", "c.testnet"])), Change::Widening);
-    }
-    #[test] fn swapping_a_payee_is_widening() {
-        assert_eq!(classify(&base(), &base().with_payees(&["a.testnet", "c.testnet"])), Change::Widening);
-    }
-    #[test] fn removing_a_payee_is_tightening() {
-        assert_eq!(classify(&base(), &base().with_payees(&["a.testnet"])), Change::Tightening);
-    }
-    #[test] fn changing_token_is_widening() {
-        assert_eq!(classify(&base(), &base().with_token("other.testnet")), Change::Widening);
-    }
-    #[test] fn unpausing_is_widening() {
-        assert_eq!(classify(&base().with_paused(true), &base().with_paused(false)), Change::Widening);
-    }
-    #[test] fn pausing_is_tightening() {
-        assert_eq!(classify(&base().with_paused(false), &base().with_paused(true)), Change::Tightening);
-    }
     #[test] fn mixed_change_is_widening() {
         // per_tx_limit down, period_limit up
         assert_eq!(classify(&base(), &base().with_per_tx(50).with_period_limit(10_000)), Change::Widening);
     }
 
     #[test] fn payee_order_does_not_change_equality_or_bytes() {
-        let a = Rule::new(acct("usdc.testnet"), 1, 2, 3, 4, 5, vec![acct("b.testnet"), acct("a.testnet")], false);
-        let b = Rule::new(acct("usdc.testnet"), 1, 2, 3, 4, 5, vec![acct("a.testnet"), acct("b.testnet")], false);
+        let a = Rule::try_new(acct("usdc.testnet"), 1, 2, 3, 4, 5, vec![acct("b.testnet"), acct("a.testnet")], false).unwrap();
+        let b = Rule::try_new(acct("usdc.testnet"), 1, 2, 3, 4, 5, vec![acct("a.testnet"), acct("b.testnet")], false).unwrap();
         assert_eq!(a, b);
         assert_eq!(near_sdk::borsh::to_vec(&a).unwrap(), near_sdk::borsh::to_vec(&b).unwrap());
     }
     #[test] fn duplicate_payees_collapse() {
-        let a = Rule::new(acct("usdc.testnet"), 1, 2, 3, 4, 5, vec![acct("a.testnet"), acct("a.testnet")], false);
-        let b = Rule::new(acct("usdc.testnet"), 1, 2, 3, 4, 5, vec![acct("a.testnet")], false);
+        let a = Rule::try_new(acct("usdc.testnet"), 1, 2, 3, 4, 5, vec![acct("a.testnet"), acct("a.testnet")], false).unwrap();
+        let b = Rule::try_new(acct("usdc.testnet"), 1, 2, 3, 4, 5, vec![acct("a.testnet")], false).unwrap();
         assert_eq!(near_sdk::borsh::to_vec(&a).unwrap(), near_sdk::borsh::to_vec(&b).unwrap());
     }
     #[test] fn json_input_is_normalised_too() {
         let json = r#"{"token":"usdc.testnet","per_tx_limit":"1","period_limit":"2","period_ms":3,
             "window_start_ms":4,"window_end_ms":5,"payees":["b.testnet","a.testnet","a.testnet"],"paused":false}"#;
         let r: Rule = near_sdk::serde_json::from_str(json).unwrap();
-        assert_eq!(r, Rule::new(acct("usdc.testnet"), 1, 2, 3, 4, 5, vec![acct("a.testnet"), acct("b.testnet")], false));
+        assert_eq!(r, Rule::try_new(acct("usdc.testnet"), 1, 2, 3, 4, 5, vec![acct("a.testnet"), acct("b.testnet")], false).unwrap());
     }
     #[test] fn every_field_has_a_comparator() {
         let v = near_sdk::serde_json::to_value(base()).unwrap();
@@ -212,5 +181,121 @@ mod tests {
         json_fields.sort();
         table.sort();
         assert_eq!(json_fields, table);
+    }
+
+    #[test] fn removing_a_payee_is_tightening() {
+        assert_eq!(classify(&base(), &base().with_payees(&["a.testnet"])), Change::Tightening);
+    }
+    #[test] fn shorter_period_is_widening() {
+        assert_eq!(classify(&base(), &base().with_period_ms(86_399_999)), Change::Widening);
+    }
+
+    // Pinned meanings (see the doc comment on `Rule`).
+    #[test] fn empty_payees_means_pay_nobody() {
+        // Emptying the list tightens; filling an empty list widens. An empty list is never "any payee".
+        assert_eq!(classify(&base(), &base().with_payees(&[])), Change::Tightening);
+        assert_eq!(classify(&base().with_payees(&[]), &base()), Change::Widening);
+    }
+    #[test] fn zero_limits_mean_zero_allowed_not_unlimited() {
+        assert_eq!(classify(&base(), &base().with_per_tx(0).with_period_limit(0)), Change::Tightening);
+        assert_eq!(classify(&base().with_per_tx(0), &base()), Change::Widening);
+        assert_eq!(classify(&base().with_period_limit(0), &base()), Change::Widening);
+    }
+
+    fn try_with(period_ms: u64, start: u64, end: u64) -> Result<Rule, String> {
+        Rule::try_new(acct("usdc.testnet"), 1, 2, period_ms, start, end, vec![], false)
+    }
+    #[test] fn zero_period_is_rejected() {
+        assert!(try_with(0, 0, 10).is_err());
+    }
+    #[test] fn inverted_window_is_rejected() {
+        assert!(try_with(1, 9_500, 500).is_err());
+        assert!(try_with(1, 1, 0).is_err());
+    }
+    #[test] fn degenerate_but_ordered_windows_are_accepted() {
+        assert!(try_with(1, 5, 5).is_ok());
+        assert!(try_with(1, 0, u64::MAX).is_ok()); // the "no restriction" sentinel
+    }
+    #[test] fn json_cannot_build_an_invalid_rule() {
+        let mk = |period: u64, start: u64, end: u64| format!(
+            r#"{{"token":"usdc.testnet","per_tx_limit":"1","period_limit":"2","period_ms":{period},
+            "window_start_ms":{start},"window_end_ms":{end},"payees":[],"paused":false}}"#);
+        assert!(near_sdk::serde_json::from_str::<Rule>(&mk(0, 0, 10)).is_err());
+        assert!(near_sdk::serde_json::from_str::<Rule>(&mk(1, 9_500, 500)).is_err());
+        assert!(near_sdk::serde_json::from_str::<Rule>(&mk(1, 0, 10)).is_ok());
+    }
+
+    // Exhaustive guard: every comparator must react to its own field and to no other.
+    // Returns (current, proposed) where only `field` loosens, or None if the field has no
+    // tightened direction.
+    fn loosened(field: &str) -> (Rule, Rule) {
+        let b = base();
+        match field {
+            "token" => (b.clone(), b.with_token("other.testnet")),
+            "per_tx_limit" => (b.clone(), b.with_per_tx(101)),
+            "period_limit" => (b.clone(), b.with_period_limit(1_001)),
+            "period_ms" => (b.clone(), b.with_period_ms(86_399_999)),
+            "window_start_ms" => (b.clone(), b.with_window(999, 9_000)),
+            "window_end_ms" => (b.clone(), b.with_window(1_000, 9_001)),
+            "payees" => (b.clone(), b.with_payees(&["a.testnet", "b.testnet", "c.testnet"])),
+            "paused" => (b.clone().with_paused(true), b),
+            other => panic!("no loosening case for field {other}: add one"),
+        }
+    }
+    fn tightened(field: &str) -> Option<(Rule, Rule)> {
+        let b = base();
+        Some(match field {
+            "token" => return None, // any token change is a loosening
+            "per_tx_limit" => (b.clone(), b.with_per_tx(99)),
+            "period_limit" => (b.clone(), b.with_period_limit(999)),
+            "period_ms" => (b.clone(), b.with_period_ms(86_400_001)),
+            "window_start_ms" => (b.clone(), b.with_window(1_001, 9_000)),
+            "window_end_ms" => (b.clone(), b.with_window(1_000, 8_999)),
+            "payees" => (b.clone(), b.with_payees(&["a.testnet"])),
+            "paused" => (b.clone(), b.with_paused(true)),
+            other => panic!("no tightening case for field {other}: add one"),
+        })
+    }
+    fn fired(table: &[Comparator], c: &Rule, p: &Rule) -> Vec<&'static str> {
+        table.iter().filter(|x| (x.loosens)(c, p)).map(|x| x.field).collect()
+    }
+    fn check_table(table: &[Comparator]) -> Result<(), String> {
+        for entry in table {
+            let (c, p) = loosened(entry.field);
+            let got = fired(table, &c, &p);
+            if got != vec![entry.field] {
+                return Err(format!("loosening only {} fired {:?}", entry.field, got));
+            }
+            if let Some((c, p)) = tightened(entry.field) {
+                let got = fired(table, &c, &p);
+                if !got.is_empty() {
+                    return Err(format!("tightening {} fired {:?}", entry.field, got));
+                }
+            }
+        }
+        Ok(())
+    }
+    #[test] fn each_comparator_fires_for_its_own_field_only() {
+        check_table(&COMPARATORS).unwrap();
+    }
+    #[test] fn guard_catches_a_flipped_comparator() {
+        let flipped = Comparator { field: "per_tx_limit", loosens: |c, p| p.per_tx_limit < c.per_tx_limit };
+        let table: Vec<Comparator> = COMPARATORS.iter()
+            .map(|c| if c.field == "per_tx_limit" { Comparator { field: flipped.field, loosens: flipped.loosens } } else { Comparator { field: c.field, loosens: c.loosens } })
+            .collect();
+        assert!(check_table(&table).is_err());
+    }
+    #[test] fn guard_catches_a_comparator_that_never_fires() {
+        let table: Vec<Comparator> = COMPARATORS.iter()
+            .map(|c| if c.field == "paused" { Comparator { field: "paused", loosens: |_, _| false } } else { Comparator { field: c.field, loosens: c.loosens } })
+            .collect();
+        assert!(check_table(&table).is_err());
+    }
+    #[test] fn u128_max_boundary() {
+        let hi = base().with_per_tx(u128::MAX).with_period_limit(u128::MAX);
+        let lo = base().with_per_tx(u128::MAX - 1).with_period_limit(u128::MAX - 1);
+        assert_eq!(classify(&lo, &hi), Change::Widening);
+        assert_eq!(classify(&hi, &lo), Change::Tightening);
+        assert_eq!(classify(&hi, &hi), Change::Tightening);
     }
 }
