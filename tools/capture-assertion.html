@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Leash passkey capture</title>
+<style>
+  :root { color-scheme: light dark; --fg: #111; --bg: #fff; --muted: #666; --line: #d8d8d8; --accent: #1a5fb4; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #e8e8e8; --bg: #141414; --muted: #9a9a9a; --line: #333; --accent: #78aeed; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; max-width: 46rem; margin-inline: auto;
+         font: 16px/1.5 system-ui, -apple-system, sans-serif; color: var(--fg); background: var(--bg); }
+  h1 { font-size: 1.3rem; margin: 0 0 .25rem; }
+  p.lede { color: var(--muted); margin-top: 0; }
+  section { border-top: 1px solid var(--line); padding-top: 1rem; margin-top: 1.25rem; }
+  h2 { font-size: 1rem; margin: 0 0 .5rem; }
+  button { font: inherit; padding: .7rem 1.1rem; border: 1px solid var(--accent); border-radius: 8px;
+           background: var(--accent); color: #fff; cursor: pointer; }
+  button:disabled { opacity: .45; cursor: default; }
+  button.secondary { background: transparent; color: var(--accent); }
+  label { display: block; font-size: .85rem; color: var(--muted); margin: .75rem 0 .25rem; }
+  input, textarea { width: 100%; font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+                    padding: .5rem; border: 1px solid var(--line); border-radius: 6px;
+                    background: var(--bg); color: var(--fg); }
+  pre { background: rgba(127,127,127,.12); padding: .75rem; border-radius: 6px; overflow-x: auto;
+        font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap;
+        word-break: break-all; }
+  .status { font-size: .9rem; margin-top: .5rem; }
+  .status.err { color: #c01c28; }
+  .status.ok { color: #1a7f37; }
+  code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; background: rgba(127,127,127,.15);
+         padding: .1em .35em; border-radius: 4px; }
+  ol { padding-left: 1.3rem; }
+</style>
+</head>
+<body>
+
+<h1>Leash passkey capture</h1>
+<p class="lede">Registers a passkey on this device and produces one assertion, printed in exactly
+the JSON shape of <code>tests-sandbox/tests/fixtures/*.json</code>, so a real capture is a drop-in
+replacement for a generated fixture.</p>
+
+<section>
+  <h2>Before you start</h2>
+  <ol>
+    <li>WebAuthn needs a secure context. Serve this file over HTTPS, or open it on
+      <code>http://localhost</code>. A <code>file://</code> URL will not work.</li>
+    <li>To capture from a phone, put the page behind an HTTPS tunnel and open the tunnel's URL on
+      the phone. The <code>rpId</code> below has to be that hostname or a parent of it.</li>
+    <li>Register, then assert. The browser will ask for Face ID, a fingerprint or the device PIN;
+      that unlock is what sets the UV bit the contract checks.</li>
+  </ol>
+  <label for="rpid">rpId (defaults to this page's hostname)</label>
+  <input id="rpid">
+</section>
+
+<section>
+  <h2>1 · Register a passkey</h2>
+  <p class="lede">Creates an ES256 (P-256) credential with user verification required, and reads
+  its public key out as uncompressed SEC1 — the form <code>verify_assertion</code> takes.</p>
+  <button id="register">Register</button>
+  <button id="forget" class="secondary">Forget stored credential</button>
+  <div class="status" id="reg-status"></div>
+  <pre id="reg-out" hidden></pre>
+</section>
+
+<section>
+  <h2>2 · Sign a challenge</h2>
+  <label for="challenge">Challenge, 32 bytes as standard base64. Leave blank for a random one.
+    Paste a rule challenge here to sign that exact rule.</label>
+  <input id="challenge" placeholder="(random)">
+  <p></p>
+  <button id="assert" disabled>Sign</button>
+  <div class="status" id="sig-status"></div>
+</section>
+
+<section>
+  <h2>3 · The fixture</h2>
+  <p class="lede">Save this as <code>assertion_valid.json</code>, or pass the five
+  <code>probe_verify</code> fields straight to the contract.</p>
+  <pre id="out" hidden></pre>
+  <button id="copy" class="secondary" hidden>Copy JSON</button>
+</section>
+
+<script>
+"use strict";
+
+// --- byte helpers ----------------------------------------------------------------------
+// The contract reads standard base64 (near-sdk's Base64VecU8). WebAuthn itself uses
+// *unpadded base64url* inside clientDataJSON. Both appear below; mixing them up is the most
+// common way to lose an afternoon here.
+const b64 = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)));
+const fromB64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+const utf8 = (buf) => new TextDecoder().decode(buf);
+
+const STORE_KEY = "leash.capture.credential";
+const $ = (id) => document.getElementById(id);
+
+$("rpid").value = location.hostname || "localhost";
+
+function setStatus(el, text, kind) {
+  const node = $(el);
+  node.textContent = text;
+  node.className = "status" + (kind ? " " + kind : "");
+}
+
+function loadStored() {
+  try {
+    return JSON.parse(localStorage.getItem(STORE_KEY) || "null");
+  } catch {
+    return null;
+  }
+}
+
+function showStored(stored) {
+  if (!stored) {
+    $("reg-out").hidden = true;
+    $("assert").disabled = true;
+    return;
+  }
+  $("reg-out").hidden = false;
+  $("reg-out").textContent =
+    "credential_id: " + stored.credential_id + "\npubkey_sec1:   " + stored.pubkey_sec1 +
+    "\n(" + fromB64(stored.pubkey_sec1).length + " bytes, uncompressed SEC1)";
+  $("assert").disabled = false;
+  setStatus("reg-status", "A credential is registered on this device.", "ok");
+}
+
+showStored(loadStored());
+
+// --- 1. registration -------------------------------------------------------------------
+
+$("register").addEventListener("click", async () => {
+  setStatus("reg-status", "waiting for the device…");
+  try {
+    const cred = await navigator.credentials.create({
+      publicKey: {
+        challenge: crypto.getRandomValues(new Uint8Array(32)),
+        rp: { name: "Leash", id: $("rpid").value || undefined },
+        user: {
+          id: crypto.getRandomValues(new Uint8Array(16)),
+          name: "leash-owner",
+          displayName: "Leash owner",
+        },
+        // -7 is ES256: ECDSA over P-256 with SHA-256. It is the only algorithm the
+        // contract verifies, so do not offer -257 (RS256) as a fallback.
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+        authenticatorSelection: {
+          userVerification: "required",
+          residentKey: "preferred",
+        },
+        timeout: 120000,
+        attestation: "none",
+      },
+    });
+
+    // getPublicKey() returns SPKI DER. Rather than slicing the last 65 bytes off it by
+    // hand, re-import it and export as "raw", which *is* uncompressed SEC1 (0x04 ‖ X ‖ Y).
+    const spki = cred.response.getPublicKey();
+    if (!spki) throw new Error("this browser did not expose getPublicKey()");
+    const key = await crypto.subtle.importKey(
+      "spki", spki, { name: "ECDSA", namedCurve: "P-256" }, true, ["verify"],
+    );
+    const raw = await crypto.subtle.exportKey("raw", key);
+    if (new Uint8Array(raw)[0] !== 0x04) throw new Error("public key is not uncompressed SEC1");
+
+    const stored = {
+      credential_id: b64(cred.rawId),
+      pubkey_sec1: b64(raw),
+      rp_id: $("rpid").value || location.hostname,
+      origin: location.origin,
+    };
+    localStorage.setItem(STORE_KEY, JSON.stringify(stored));
+    showStored(stored);
+  } catch (e) {
+    setStatus("reg-status", "registration failed: " + e, "err");
+  }
+});
+
+$("forget").addEventListener("click", () => {
+  localStorage.removeItem(STORE_KEY);
+  showStored(null);
+  setStatus("reg-status", "forgotten. The passkey itself is still on the device; register again " +
+    "to get a fresh one.");
+});
+
+// --- 2. assertion ----------------------------------------------------------------------
+
+$("assert").addEventListener("click", async () => {
+  const stored = loadStored();
+  if (!stored) return;
+  setStatus("sig-status", "waiting for the device…");
+  try {
+    let challenge;
+    const typed = $("challenge").value.trim();
+    if (typed) {
+      challenge = fromB64(typed);
+      if (challenge.length !== 32) throw new Error("a challenge is 32 bytes, got " + challenge.length);
+    } else {
+      challenge = crypto.getRandomValues(new Uint8Array(32));
+    }
+
+    const assertion = await navigator.credentials.get({
+      publicKey: {
+        challenge,
+        rpId: stored.rp_id || undefined,
+        allowCredentials: [{ type: "public-key", id: fromB64(stored.credential_id) }],
+        // "required" is what makes the authenticator check a biometric or the PIN and set
+        // the UV bit. With "preferred" the device may skip it and the contract will reject.
+        userVerification: "required",
+        timeout: 120000,
+      },
+    });
+
+    const authData = new Uint8Array(assertion.response.authenticatorData);
+    const flags = authData[32];
+    const signCount = new DataView(authData.buffer, authData.byteOffset).getUint32(33, false);
+    const clientJson = utf8(assertion.response.clientDataJSON);
+
+    const fixture = {
+      note: "Captured from a real device by tools/capture-assertion.html. Verifying it proves " +
+            "a human was present at this registered device, not that a unique human was.",
+      credential_id: b64(assertion.rawId),
+      pubkey_sec1: stored.pubkey_sec1,
+      challenge: b64(challenge),
+      authenticator_data: b64(authData),
+      client_data_json: clientJson,
+      // An ES256 assertion signature is already DER-encoded SEQUENCE { r, s }. Unlike
+      // WebCrypto's subtle.sign, there is nothing to convert here.
+      signature_der: b64(assertion.response.signature),
+      meta: {
+        generated_by: "tools/capture-assertion.html",
+        captured_at: new Date().toISOString(),
+        user_agent: navigator.userAgent,
+        rp_id: stored.rp_id,
+        origin: location.origin,
+        flags: "0x" + flags.toString(16).padStart(2, "0"),
+        user_present: Boolean(flags & 0x01),
+        user_verified: Boolean(flags & 0x04),
+        sign_count: signCount,
+        signed_challenge: b64(challenge),
+        pubkey_sec1_form: "uncompressed (0x04 ‖ X ‖ Y, 65 bytes)",
+      },
+    };
+
+    if (!(flags & 0x04)) {
+      setStatus("sig-status", "captured, but the UV bit is clear (flags 0x" +
+        flags.toString(16) + "). The contract will reject this one. " +
+        "Useful as an assertion_uv_clear fixture; useless as a valid one.", "err");
+    } else {
+      setStatus("sig-status", "captured, UV bit set, " + authData.length +
+        " bytes of authenticatorData.", "ok");
+    }
+
+    $("out").hidden = false;
+    $("out").textContent = JSON.stringify(fixture, null, 2);
+    $("copy").hidden = false;
+  } catch (e) {
+    setStatus("sig-status", "signing failed: " + e, "err");
+  }
+});
+
+$("copy").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText($("out").textContent);
+    setStatus("sig-status", "copied.", "ok");
+  } catch (e) {
+    setStatus("sig-status", "could not copy, select the text instead: " + e, "err");
+  }
+});
+</script>
+</body>
+</html>

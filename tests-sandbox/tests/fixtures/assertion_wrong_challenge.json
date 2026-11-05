@@ -1,0 +1,22 @@
+{
+  "note": "A genuine assertion over a different rule's challenge (rule B) presented where rule A's challenge is expected. This is the replay case: signature and UV bit are both fine.",
+  "credential_id": "vxK33cYwejlMTXhPym/+Fw==",
+  "pubkey_sec1": "BNVMB+H3Rx6ftWIMZVMnOKn0c3jcPQCyDB3LsElMJL9RFEBlQDe4rm8C8El1E20vddhTsKsQoEQrmL+VhDD+Z1Q=",
+  "challenge": "sF/nwa+u8qNWaLPVm8d5sCWfvE7zyKMddGb5X9FXj7Q=",
+  "authenticator_data": "Kshb7txl6M3jNo8UMD9gdLwvVpD6fTGqwI5j5qgY6kQFAAAAAw==",
+  "client_data_json": "{\"type\":\"webauthn.get\",\"challenge\":\"LsDf9RjL4U9ot1Gfr20gqExOe8KPFDLV1XCfVPIoN4M\",\"origin\":\"https://leash.local\",\"crossOrigin\":false}",
+  "signature_der": "MEUCIEJuR5DDztlVyjRjgGeEb/QrFom4LPSzdpXpIvXm88L8AiEAizb0eurAkAF6nn9CjkT1TXoegrbUFC92yZ2GYFeQtks=",
+  "meta": {
+    "generated_by": "tools/make-fixtures.mjs",
+    "rp_id": "leash.local",
+    "origin": "https://leash.local",
+    "flags": "0x05",
+    "user_present": true,
+    "user_verified": true,
+    "sign_count": 3,
+    "signed_challenge": "LsDf9RjL4U9ot1Gfr20gqExOe8KPFDLV1XCfVPIoN4M=",
+    "pubkey_sec1_form": "uncompressed (0x04 ‖ X ‖ Y, 65 bytes)",
+    "pubkey_sec1_compressed": "AtVMB+H3Rx6ftWIMZVMnOKn0c3jcPQCyDB3LsElMJL9R",
+    "signature_s_is_high": true
+  }
+}

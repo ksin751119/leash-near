@@ -1,0 +1,22 @@
+{
+  "note": "UV bit clear (flags 0x01, user present only): the device was touched but no biometric or PIN was checked. Signature and challenge are both valid, so the only reason to reject this is the missing UV bit.",
+  "credential_id": "vxK33cYwejlMTXhPym/+Fw==",
+  "pubkey_sec1": "BNVMB+H3Rx6ftWIMZVMnOKn0c3jcPQCyDB3LsElMJL9RFEBlQDe4rm8C8El1E20vddhTsKsQoEQrmL+VhDD+Z1Q=",
+  "challenge": "sF/nwa+u8qNWaLPVm8d5sCWfvE7zyKMddGb5X9FXj7Q=",
+  "authenticator_data": "Kshb7txl6M3jNo8UMD9gdLwvVpD6fTGqwI5j5qgY6kQBAAAAAg==",
+  "client_data_json": "{\"type\":\"webauthn.get\",\"challenge\":\"sF_nwa-u8qNWaLPVm8d5sCWfvE7zyKMddGb5X9FXj7Q\",\"origin\":\"https://leash.local\",\"crossOrigin\":false}",
+  "signature_der": "MEMCIE5vjOd2O52eH7x4uw4Xt0LLEbrm3hZFeJj+yR1BivJBAh9PLAjdcnMpAX+7G3YWhYyyzmB9XbQ8KPa3uCBkp6qV",
+  "meta": {
+    "generated_by": "tools/make-fixtures.mjs",
+    "rp_id": "leash.local",
+    "origin": "https://leash.local",
+    "flags": "0x01",
+    "user_present": true,
+    "user_verified": false,
+    "sign_count": 2,
+    "signed_challenge": "sF/nwa+u8qNWaLPVm8d5sCWfvE7zyKMddGb5X9FXj7Q=",
+    "pubkey_sec1_form": "uncompressed (0x04 ‖ X ‖ Y, 65 bytes)",
+    "pubkey_sec1_compressed": "AtVMB+H3Rx6ftWIMZVMnOKn0c3jcPQCyDB3LsElMJL9R",
+    "signature_s_is_high": false
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "note": "A well-formed assertion: user present and user verified, challenge matches. Passing this proves a human was present at this registered device, not that a unique human was.",
+  "credential_id": "vxK33cYwejlMTXhPym/+Fw==",
+  "pubkey_sec1": "BNVMB+H3Rx6ftWIMZVMnOKn0c3jcPQCyDB3LsElMJL9RFEBlQDe4rm8C8El1E20vddhTsKsQoEQrmL+VhDD+Z1Q=",
+  "challenge": "sF/nwa+u8qNWaLPVm8d5sCWfvE7zyKMddGb5X9FXj7Q=",
+  "authenticator_data": "Kshb7txl6M3jNo8UMD9gdLwvVpD6fTGqwI5j5qgY6kQFAAAAAQ==",
+  "client_data_json": "{\"type\":\"webauthn.get\",\"challenge\":\"sF_nwa-u8qNWaLPVm8d5sCWfvE7zyKMddGb5X9FXj7Q\",\"origin\":\"https://leash.local\",\"crossOrigin\":false}",
+  "signature_der": "MEUCIQDQDTPThBlTq5V6z/kUOwnHEo+pWqJrb7sWHTXTc/c9nAIgVRneDXmCkQk7FOe2TrTpGkR4LreqBtp1kwq6q6woE0o=",
+  "meta": {
+    "generated_by": "tools/make-fixtures.mjs",
+    "rp_id": "leash.local",
+    "origin": "https://leash.local",
+    "flags": "0x05",
+    "user_present": true,
+    "user_verified": true,
+    "sign_count": 1,
+    "signed_challenge": "sF/nwa+u8qNWaLPVm8d5sCWfvE7zyKMddGb5X9FXj7Q=",
+    "pubkey_sec1_form": "uncompressed (0x04 ‖ X ‖ Y, 65 bytes)",
+    "pubkey_sec1_compressed": "AtVMB+H3Rx6ftWIMZVMnOKn0c3jcPQCyDB3LsElMJL9R",
+    "signature_s_is_high": false
+  }
+}

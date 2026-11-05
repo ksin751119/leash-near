@@ -21,3 +21,7 @@ path = "tests/sandbox/account_is_frozen.rs"
 [[test]]
 name = "test_token"
 path = "tests/sandbox/test_token.rs"
+
+[[test]]
+name = "widen_requires_passkey"
+path = "tests/sandbox/widen_requires_passkey.rs"

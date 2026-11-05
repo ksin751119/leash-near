@@ -9,6 +9,13 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 near-sdk = "5"
+# P-256 (secp256r1) ECDSA, pure Rust. NEAR has host functions for ed25519 and secp256k1 but
+# not for P-256, and WebAuthn authenticators sign with P-256, so the curve arithmetic runs
+# inside the wasm. `default-features = false` keeps `std` and the random-number generator out:
+# verification needs no randomness, and anything that drags in `getrandom` fails to build for
+# wasm32-unknown-unknown.
+p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+sha2 = { version = "0.10", default-features = false }
 
 [dev-dependencies]
 near-sdk = { version = "5", features = ["unit-testing"] }
