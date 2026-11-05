@@ -75,7 +75,9 @@ step: whoever registers a credential vouches that it is a real authenticator.</p
 <section>
   <h2>2 · Sign a challenge</h2>
   <label for="challenge">Challenge, 32 bytes as standard base64. Leave blank for a random one.
-    Paste a rule challenge here to sign that exact rule.</label>
+    Paste a rule challenge here to sign that exact rule — get it from the contract's
+    <code>challenge_for(node, rule, credential_id)</code> view, which returns exactly these
+    bytes (layout: <code>contract/src/challenge.rs</code>). Nothing here needs to compute it.</label>
   <input id="challenge" placeholder="(random)">
   <p></p>
   <button id="assert" disabled>Sign</button>

@@ -81,16 +81,56 @@ pub enum VerifyError {
     Malformed,
 }
 
+/// Byte fields as standard base64 in JSON, which is what `Base64VecU8` uses on the wire and
+/// what a browser can produce from an `ArrayBuffer` in two lines.
+///
+/// Serialising only: `Credential` deserialises through `CredentialInput`, which uses
+/// `Base64VecU8` directly.
+mod b64_bytes {
+    use near_sdk::json_types::Base64VecU8;
+    use near_sdk::serde::{Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        Base64VecU8::from(v.to_vec()).serialize(s)
+    }
+}
+
+/// The wire form of a credential, as `register_credential` takes it. Deserialising goes
+/// through `Credential::try_new`, so a credential that arrives as JSON has had its public
+/// key parsed before it reaches state.
+///
+/// `nonce` is optional and defaults to 0. Supplying one is allowed (an operator restoring a
+/// credential after a migration needs it) and is safe only because re-registering an id is
+/// refused outright — see `register_credential`. A reset nonce would re-arm every assertion
+/// ever signed under that credential.
+#[near(serializers = [json])]
+pub struct CredentialInput {
+    pub id: Base64VecU8,
+    pub pubkey_sec1: Base64VecU8,
+    pub nonce: Option<u64>,
+}
+
+impl TryFrom<CredentialInput> for Credential {
+    type Error = String;
+    fn try_from(i: CredentialInput) -> Result<Self, String> {
+        Credential::try_new(i.id.into(), i.pubkey_sec1.into(), i.nonce.unwrap_or(0))
+            .map_err(|e| format!("credential rejected: {e:?}"))
+    }
+}
+
 /// A registered passkey. `nonce` is the credential's own replay counter: it goes into the
 /// challenge the device signs, so an assertion can be spent exactly once.
 ///
 /// Fields are private and `try_new` is the only way in, so a `Credential` that exists is one
 /// whose public key parses. Rejecting a bad key at registration rather than at use matters
 /// here: the whole point of the credential is to be available in an emergency.
-#[near(serializers = [borsh])]
+#[near(serializers = [borsh, json])]
+#[serde(try_from = "CredentialInput")]
 #[derive(Clone, PartialEq, Debug)]
 pub struct Credential {
+    #[serde(serialize_with = "b64_bytes::serialize")]
     id: Vec<u8>,
+    #[serde(serialize_with = "b64_bytes::serialize")]
     pubkey_sec1: Vec<u8>,
     nonce: u64,
 }
@@ -117,6 +157,20 @@ impl Credential {
 
     pub fn nonce(&self) -> u64 {
         self.nonce
+    }
+
+    /// Spend this credential's current nonce. Called only after an assertion has verified,
+    /// so a rejected assertion never burns one.
+    ///
+    /// Strictly increasing and never reset: that is the whole replay guard. Note that it is
+    /// keyed on the nonce and not on the signature bytes — ECDSA signatures are malleable
+    /// (negate `s` and the signature still verifies), so a dedupe keyed on the signature
+    /// could be walked straight around.
+    pub fn spend_nonce(&mut self) {
+        self.nonce = self
+            .nonce
+            .checked_add(1)
+            .unwrap_or_else(|| near_sdk::env::panic_str("credential nonce exhausted"));
     }
 }
 

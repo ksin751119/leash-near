@@ -294,7 +294,7 @@ Expected: FAIL — methods not found.
 
 - [ ] **Step 3: Implement the methods**
 
-`set_rule` requires `predecessor_id == admin`; computes `classify`; when `Widening`, requires an assertion whose challenge is `sha256(borsh(proposed_rule) ‖ cred.nonce)` and increments the nonce on success; bumps `epoch` on every accepted change.
+`set_rule` requires `predecessor_id == admin`; computes `classify`; when `Widening`, requires an assertion whose challenge binds the action, the node, the normalised rule, `cred.nonce` and `env::current_account_id()` (layout in `contract/src/challenge.rs` — the plan's original `sha256(borsh(proposed_rule) ‖ cred.nonce)` bound too little, see the spec's passkey section), and increments the nonce on success; bumps `epoch` on every accepted change. A node with no rule yet counts as `Widening`.
 
 - [ ] **Step 4: Run to verify they pass**
 

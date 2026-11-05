@@ -47,6 +47,7 @@ impl TryFrom<RuleInput> for Rule {
 /// - `period_ms == 0` is invalid and rejected (the period bucket is `now_ms / period_ms`).
 /// - An empty `payees` list means pay nobody, never "any payee".
 /// - `per_tx_limit == 0` and `period_limit == 0` mean zero allowed, never "unlimited".
+/// - At most [`MAX_PAYEES`] payees, so one rule's storage footprint is bounded.
 #[near(serializers = [borsh, json])]
 #[serde(try_from = "RuleInput")]
 #[derive(Clone, PartialEq, Debug)]
@@ -62,6 +63,12 @@ pub struct Rule {
     payees: Vec<AccountId>,
     paused: bool,
 }
+
+/// Cap on a rule's payee list. A rule lives in contract state and the contract account
+/// pays the storage staking for it, so the list cannot be unbounded. 32 is far above
+/// anything this design is for (a node is one team's budget) and far below anything that
+/// makes a rule expensive to hold or to hash.
+pub const MAX_PAYEES: usize = 32;
 
 impl Rule {
     #[allow(clippy::too_many_arguments)]
@@ -83,7 +90,67 @@ impl Rule {
         }
         payees.sort();
         payees.dedup();
+        // After deduping, so a list that is long only because it repeats itself is fine.
+        if payees.len() > MAX_PAYEES {
+            return Err(format!("at most {MAX_PAYEES} payees, got {}", payees.len()));
+        }
         Ok(Self { token, per_tx_limit, period_limit, period_ms, window_start_ms, window_end_ms, payees, paused })
+    }
+
+    pub fn token(&self) -> &AccountId {
+        &self.token
+    }
+    pub fn per_tx_limit(&self) -> u128 {
+        self.per_tx_limit
+    }
+    pub fn period_limit(&self) -> u128 {
+        self.period_limit
+    }
+    pub fn period_ms(&self) -> u64 {
+        self.period_ms
+    }
+    pub fn window_start_ms(&self) -> u64 {
+        self.window_start_ms
+    }
+    pub fn window_end_ms(&self) -> u64 {
+        self.window_end_ms
+    }
+    pub fn payees(&self) -> &[AccountId] {
+        &self.payees
+    }
+    pub fn paused(&self) -> bool {
+        self.paused
+    }
+
+    /// This rule with `payee` added, still canonical. `Err` if the list is already full.
+    ///
+    /// Built from a stored `Rule` rather than from anything a caller sent, which is what
+    /// lets `add_payee` take no rule argument at all: there are no caller-supplied bytes in
+    /// the value that gets hashed.
+    pub fn with_payee(&self, payee: AccountId) -> Result<Self, String> {
+        let mut payees = self.payees.clone();
+        payees.push(payee);
+        Self::try_new(
+            self.token.clone(),
+            self.per_tx_limit,
+            self.period_limit,
+            self.period_ms,
+            self.window_start_ms,
+            self.window_end_ms,
+            payees,
+            self.paused,
+        )
+    }
+
+    /// This rule with `payee` gone. Removing an absent payee gives back an equal rule, which
+    /// is what makes `remove_payee` idempotent — a tightening must never fail for being
+    /// already done.
+    ///
+    /// Infallible: the list can only get shorter, so no validation can newly fail.
+    pub fn without_payee(&self, payee: &AccountId) -> Self {
+        let mut next = self.clone();
+        next.payees.retain(|p| p != payee);
+        next
     }
 }
 
@@ -95,6 +162,9 @@ pub enum Change {
 
 /// One field's answer to "does the proposed value loosen this field?".
 struct Comparator {
+    /// Read by the tests that prove the table covers every field and that each entry reacts
+    /// to its own field only. Nothing at runtime needs it.
+    #[allow(dead_code)]
     field: &'static str,
     loosens: fn(&Rule, &Rule) -> bool,
 }
@@ -301,6 +371,41 @@ mod tests {
             .collect();
         assert!(check_table(&table).is_err());
     }
+    #[test] fn too_many_payees_is_rejected() {
+        let many: Vec<AccountId> = (0..MAX_PAYEES + 1).map(|i| acct(&format!("p{i}.testnet"))).collect();
+        assert!(Rule::try_new(acct("usdc.testnet"), 1, 2, 3, 4, 5, many, false).is_err());
+        let exactly: Vec<AccountId> = (0..MAX_PAYEES).map(|i| acct(&format!("p{i}.testnet"))).collect();
+        assert!(Rule::try_new(acct("usdc.testnet"), 1, 2, 3, 4, 5, exactly, false).is_ok());
+    }
+    #[test] fn a_long_list_of_duplicates_is_not_too_many() {
+        let dupes: Vec<AccountId> = (0..MAX_PAYEES * 4).map(|_| acct("a.testnet")).collect();
+        assert_eq!(Rule::try_new(acct("usdc.testnet"), 1, 2, 3, 4, 5, dupes, false).unwrap().payees().len(), 1);
+    }
+    #[test] fn with_payee_stays_canonical_and_widens() {
+        let b = base();
+        let wider = b.with_payee(acct("aa.testnet")).unwrap();
+        assert_eq!(wider.payees(), [acct("a.testnet"), acct("aa.testnet"), acct("b.testnet")]);
+        assert_eq!(classify(&b, &wider), Change::Widening);
+    }
+    #[test] fn with_payee_is_a_no_op_for_a_payee_already_listed() {
+        let b = base();
+        assert_eq!(b.with_payee(acct("a.testnet")).unwrap(), b);
+    }
+    #[test] fn with_payee_refuses_to_exceed_the_cap() {
+        let full: Vec<AccountId> = (0..MAX_PAYEES).map(|i| acct(&format!("p{i:02}.testnet"))).collect();
+        let r = Rule::try_new(acct("usdc.testnet"), 1, 2, 3, 4, 5, full, false).unwrap();
+        assert!(r.with_payee(acct("zz.testnet")).is_err());
+    }
+    #[test] fn without_payee_tightens_and_is_idempotent() {
+        let b = base();
+        let narrower = b.without_payee(&acct("a.testnet"));
+        assert_eq!(narrower.payees(), [acct("b.testnet")]);
+        assert_eq!(classify(&b, &narrower), Change::Tightening);
+        // absent payee: unchanged, and removing it again changes nothing
+        assert_eq!(b.without_payee(&acct("nobody.testnet")), b);
+        assert_eq!(narrower.without_payee(&acct("a.testnet")), narrower);
+    }
+
     #[test] fn u128_max_boundary() {
         let hi = base().with_per_tx(u128::MAX).with_period_limit(u128::MAX);
         let lo = base().with_per_tx(u128::MAX - 1).with_period_limit(u128::MAX - 1);

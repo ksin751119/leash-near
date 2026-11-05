@@ -12,6 +12,20 @@ anyhow = "1"
 openssl = { version = "0.10", features = ["vendored"] }
 near-workspaces = "0.24"
 serde_json = "1"
+# The gated methods take a challenge computed from contract state (the node, the credential's
+# nonce and the contract's own account id), so no pre-captured fixture can ever match one.
+# These tests therefore mint a P-256 key and sign assertions themselves. That a software key
+# is accepted is not a flaw being papered over — it is the documented trust boundary
+# (see contract/src/webauthn.rs): registration is admin-only precisely because the contract
+# cannot tell a secure enclave from a key like this one.
+#
+# Features mirror the contract's exactly, so nothing here can change how the wasm is built.
+p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+sha2 = { version = "0.10", default-features = false }
+# `Rule` and its Borsh encoding, so the challenge layout is reproduced here from the
+# documented byte layout rather than read back out of the contract under test.
+leash-contract = { path = "../contract" }
+near-sdk = "5"
 tokio = { version = "1", features = ["full"] }
 
 [[test]]
@@ -25,3 +39,7 @@ path = "tests/sandbox/test_token.rs"
 [[test]]
 name = "widen_requires_passkey"
 path = "tests/sandbox/widen_requires_passkey.rs"
+
+[[test]]
+name = "rules"
+path = "tests/sandbox/rules.rs"

@@ -1702,9 +1702,13 @@ name = "leash-sandbox-tests"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "leash-contract",
+ "near-sdk",
  "near-workspaces",
  "openssl",
+ "p256",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
 ]
 

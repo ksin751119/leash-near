@@ -139,13 +139,21 @@ this, a legitimate payment fails for a reason unrelated to policy and the demo l
 ## Shared budget
 
 ```
-spent: Map<(node, period_bucket), Balance>      // no agent in the key
+spent: Map<(node, epoch, period), Balance>      // no agent in the key
 ```
 
-`period_bucket = (epoch << 32) | (now_ms / period_ms)`, where `now_ms` is
-`env::block_timestamp_ms()` and `period_ms` is the rule's period. The low bits roll over on their
-own with no transaction from anyone; the high `epoch` bits are advanced only by `set_rule`, so
-changing a rule starts a fresh ledger rather than retroactively freeing or consuming headroom.
+`period = now_ms / period_ms`, where `now_ms` is `env::block_timestamp_ms()` and `period_ms` is
+the rule's period. The period rolls over on its own with no transaction from anyone; `epoch` is
+advanced only by `set_rule`, so changing a rule starts a fresh ledger rather than retroactively
+freeing or consuming headroom.
+
+**Corrected in Task 5:** this was originally written as a single packed `u64`,
+`period_bucket = (epoch << 32) | (now_ms / period_ms)`. That packing is unsafe. `now_ms` is about
+1.7e12, so any `period_ms` below roughly 400 makes the quotient exceed `u32::MAX` and carry into
+the epoch bits, silently moving a node onto a different epoch's ledger. `period_ms` is
+caller-supplied and only has to be non-zero, so that is reachable. The composite key has the same
+semantics with no overflow to reason about; `state::tests::a_tiny_period_does_not_collide_with_
+another_epoch` pins it.
 
 Consequences, both intended:
 
@@ -191,9 +199,24 @@ contract:
 
 1. Checks the **UV bit** (`authenticator_data[32] & 0x04`) — the authenticator verified a
    human at signing time (biometric or PIN).
-2. Parses `client_data_json`, checks `type == "webauthn.get"` and that `challenge` equals
-   `sha256(borsh(proposed_rule) ‖ nonce)` — the signature authorises **this exact rule
-   change**, once.
+2. Parses `client_data_json`, checks `type == "webauthn.get"` and that `challenge` equals the
+   value defined in `contract/src/challenge.rs` — the signature authorises **this exact rule
+   change, for this node, on this deployment**, once.
+
+   **Corrected in Task 5:** this was originally `sha256(borsh(proposed_rule) ‖ nonce)`, which
+   binds too little. Two nodes carrying identical rules would produce identical challenges, so a
+   signature meant to widen one would widen the other; and two deployments of this contract would
+   accept each other's signatures. The challenge therefore binds four things — the action, the
+   node, the normalised rule, the credential's nonce, and `env::current_account_id()` — with
+   every variable-length part length-prefixed so the encoding is injective. The authoritative
+   byte layout is the module doc comment on `contract/src/challenge.rs`; the view method
+   `challenge_for(node, rule, credential_id)` returns the bytes so clients need not reimplement
+   it, and `challenge_for_matches_the_documented_layout` checks that view against an independent
+   implementation of the layout.
+
+   The rule that is hashed is always one the contract parsed from JSON and re-serialised itself,
+   never bytes the caller supplied: `Rule`'s derived `BorshDeserialize` does not re-sort or dedupe
+   `payees`, so two different byte strings can mean the same rule.
 3. Verifies ECDSA-P256 over `authenticator_data ‖ sha256(client_data_json)` against the stored
    public key, using the `p256` crate compiled to wasm32.
 4. Increments the nonce.
