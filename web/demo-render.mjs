@@ -1,0 +1,229 @@
+// Pure functions from what the page read (agent /state, contract views, RPC key lists) to the
+// strings and shapes it prints.
+//
+// They live in their own module so the layout's logic is testable without a browser. Nothing
+// here decides anything: every verdict and every reason sentence is copied out of what the
+// chain returned. The one table of sentences is `refusal_codes()`, passed in as `reasons`;
+// no sentence about a refusal is written in this file, because a second copy drifts and then
+// the screen lies.
+
+export const EXPLORER = "https://explorer.testnet.near.org";
+export const txUrl = (hash) => `${EXPLORER}/transactions/${hash}`;
+export const accountUrl = (id) => `${EXPLORER}/accounts/${id}`;
+
+// NEAR account ids run to 64 characters. Short enough ones are printed whole: an id is
+// something a judge may want to compare with the explorer.
+export const shortId = (id) =>
+  typeof id === "string" && id.length > 40 ? `${id.slice(0, 22)}…${id.slice(-14)}` : (id ?? "—");
+
+// Amounts are decimal strings from the chain; BigInt, because Number rounds past 2^53.
+export function formatUsdc(raw, decimals = 6) {
+  if (raw == null) return "—";
+  try {
+    const unit = 10n ** BigInt(decimals);
+    const v = BigInt(raw);
+    const cents = ((v % unit) * 100n) / unit;
+    return `${v / unit}.${String(cents).padStart(2, "0")}`;
+  } catch {
+    return "—";
+  }
+}
+
+export function relativeTime(atSec, nowSec) {
+  const at = Number(atSec ?? 0);
+  if (!at) return "";
+  const d = Math.max(0, nowSec - at);
+  if (d < 90) return "just now";
+  if (d < 3600) return `${Math.round(d / 60)}m ago`;
+  if (d < 86400) return `${Math.round(d / 3600)}h ago`;
+  return `${Math.round(d / 86400)}d ago`;
+}
+
+// The chain's sentence for a code, from `refusal_codes()`.
+function sentenceFor(code, reasons) {
+  if (code == null) return null;
+  const hit = (reasons ?? []).find((r) => r.code === code);
+  return hit ? hit.reason : `code ${code} is not in the chain's table`;
+}
+
+// --- lastAction ------------------------------------------------------------------------
+
+const UNDERSTOOD_MISSING = "the agent did not state what it understood";
+
+// One status, one place it ends. Only "in-flight" is still moving. "unknown" and "error" are
+// final but unresolved: the agent has stopped waiting and does not know the outcome, and a
+// card that kept saying "in flight" for them is the bug this project's predecessor shipped.
+export function renderAction(a, reasons) {
+  if (!a) return null;
+  const base = {
+    status: a.status,
+    understood: a.understood || UNDERSTOOD_MISSING,
+    payee: a.payee ?? null,
+    amount: a.amount == null ? null : formatUsdc(a.amount),
+    vendor: a.vendor ?? null,
+    code: a.code ?? null,
+    reason: null,
+    inFlight: false,
+    unresolved: false,
+    moved: null,
+    txUrl: a.tx ? txUrl(a.tx) : null,
+    txShort: a.tx ? `${a.tx.slice(0, 8)}…` : null,
+    txNote: null,
+    settledBy: a.settledBy ?? null,
+  };
+  switch (a.status) {
+    case "in-flight":
+      return { ...base, inFlight: true, tone: "pending", label: "IN FLIGHT",
+        note: "Sent. Waiting for the chain to answer." };
+    case "allowed":
+      return { ...base, tone: "allowed", label: "ALLOWED", moved: true,
+        note: "The contract allowed it and dispatched the transfer.",
+        txNote: a.tx ? "Opens the transaction on the explorer." : null };
+    case "refused":
+      return { ...base, tone: "refused", label: "REFUSED BY THE CHAIN", moved: false,
+        reason: a.reason ?? sentenceFor(a.code, reasons),
+        note: "No money moved.",
+        txNote: a.tx
+          ? "This transaction shows as succeeded, on purpose. The contract returns a refusal instead of reverting, so the decision and its reason are kept on-chain. A reverted transaction would have left no record."
+          : null };
+    case "failed":
+      return { ...base, tone: "failed", label: "FAILED", moved: false,
+        note: "The policy allowed it, then the token transfer failed and the reservation was released. NEAR gives the callback no reason, so there is none to show." };
+    case "unknown":
+    case "error":
+      return { ...base, unresolved: true, tone: "unresolved",
+        label: a.status === "error" ? "UNRESOLVED · error" : "UNRESOLVED · outcome unknown",
+        reason: a.reason ?? null,
+        note: "This is not in flight: the agent has stopped waiting and does not know how it ended. It may still show up in the chain's log; this card checks again every poll." };
+    default:
+      return { ...base, unresolved: true, tone: "unresolved",
+        label: "UNRESOLVED · unrecognised status",
+        note: `The agent reported status "${a.status}", which this page does not know. It is not shown as in flight.` };
+  }
+}
+
+// --- decision_log ----------------------------------------------------------------------
+
+const NO_NODE = "no budget node (this account id has no “.”)";
+
+function renderRow(d, ring, reasons, nowSec) {
+  const o = d.outcome ?? {};
+  return {
+    ring,
+    agent: d.agent,
+    // Null stays null. It is not the agent's name; there is no budget to name.
+    node: d.node ?? null,
+    nodeLabel: d.node == null ? NO_NODE : d.node,
+    payee: d.payee,
+    amount: formatUsdc(d.amount),
+    raw: d.amount,
+    status: o.status ?? "unknown",
+    code: o.code ?? null,
+    reason: o.status === "refused" ? (o.reason ?? sentenceFor(o.code, reasons)) : null,
+    ago: relativeTime(Math.floor((d.timestamp_ms ?? 0) / 1000), nowSec),
+    timestampMs: d.timestamp_ms ?? 0,
+  };
+}
+
+export function renderDecisions(log, reasons, nowMs = Date.now()) {
+  const nowSec = Math.floor(nowMs / 1000);
+  const agents = (log?.decisions ?? []).map((d) => renderRow(d, "agents", reasons, nowSec));
+  const strangers = (log?.strangers ?? []).map((d) => renderRow(d, "strangers", reasons, nowSec));
+  const count = Number(log?.decision_count ?? 0);
+  const scount = Number(log?.stranger_count ?? 0);
+  return {
+    agents,
+    strangers,
+    agentCount: count,
+    strangerCount: scount,
+    agentsDropped: Math.max(0, count - agents.length),
+    strangersDropped: Math.max(0, scount - strangers.length),
+  };
+}
+
+// --- the shared budget -------------------------------------------------------------------
+
+// Tenths of a percent, so 0.5 USDC of 1000 is 0.1% and not 0.
+const pctOf = (raw, limit) => {
+  try {
+    if (BigInt(limit) <= 0n) return 0;
+    return Number((BigInt(raw) * 1000n) / BigInt(limit)) / 10;
+  } catch {
+    return 0;
+  }
+};
+
+// One bar, segmented by agent. `spent` is `spent_in_period` and is the authority on the total.
+// The split is read from the decision ring: allowed payments since the window began, summed
+// per agent. A refusal spent nothing and a failed transfer was released, so neither counts.
+// If the ring has already dropped some of the spending, the remainder is shown as its own
+// grey segment instead of being given to anyone, so the bar always sums to what the chain says.
+export function renderBudget({ rule, spent, windowBeganMs, log, decimals = 6 }) {
+  if (!rule) return { hasRule: false, segments: [], spent: formatUsdc(spent, decimals), limit: "—", pct: 0 };
+  const total = BigInt(spent ?? 0);
+  const since = Number(windowBeganMs ?? 0);
+  const per = new Map();
+  for (const d of log?.decisions ?? []) {
+    if (d.outcome?.status !== "allowed") continue;
+    if ((d.timestamp_ms ?? 0) < since) continue;
+    per.set(d.agent, (per.get(d.agent) ?? 0n) + BigInt(d.amount));
+  }
+  const segments = [...per.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .map(([agent, raw]) => ({ agent, raw: String(raw), amount: formatUsdc(raw, decimals), pct: pctOf(raw, rule.period_limit), label: agent }));
+  const attributed = [...per.values()].reduce((t, v) => t + v, 0n);
+  if (total > attributed) {
+    const raw = total - attributed;
+    segments.push({ agent: null, raw: String(raw), amount: formatUsdc(raw, decimals), pct: pctOf(raw, rule.period_limit), label: "older spending, no longer in the log" });
+  }
+  return {
+    hasRule: true,
+    spent: formatUsdc(total, decimals),
+    limit: formatUsdc(rule.period_limit, decimals),
+    perTx: formatUsdc(rule.per_tx_limit, decimals),
+    pct: pctOf(total, rule.period_limit),
+    segments,
+    // The ring says more than the chain's total. Possible only if the two reads straddled a
+    // spend; shown rather than hidden.
+    overAttributed: attributed > total,
+  };
+}
+
+// --- keys ----------------------------------------------------------------------------------
+
+function describeKey(k, wallet) {
+  const p = k.access_key?.permission;
+  if (p === "FullAccess") return { key: k.public_key, kind: "full access", restricted: false };
+  const fc = p?.FunctionCall;
+  if (!fc) return { key: k.public_key, kind: "unrecognised permission", restricted: false };
+  const methods = (fc.method_names ?? []).join(", ") || "any method";
+  const restricted = fc.receiver_id === wallet && methods === "spend";
+  return { key: k.public_key, kind: `${methods} on ${fc.receiver_id}`, restricted };
+}
+
+// The headline. Zero keys of any kind on the account that holds the money. An unreadable list
+// is "unknown": the page must never turn a failed RPC into the strongest claim it makes.
+export function renderWalletKeys(list, wallet) {
+  if (!list || !Array.isArray(list.keys)) {
+    return { known: false, count: null, tone: "unknown", keys: [],
+      headline: "Cannot read the wallet's keys right now",
+      detail: "The RPC did not answer, so this page makes no claim about the wallet's keys." };
+  }
+  const keys = list.keys.map((k) => describeKey(k, wallet));
+  if (keys.length === 0) {
+    return { known: true, count: 0, tone: "zero", keys,
+      headline: "The wallet has zero keys",
+      detail: "The account that holds the money has no access keys of any kind, so nobody can sign as it. The only way money leaves is spend, which an agent calls from its own account and the contract decides." };
+  }
+  return { known: true, count: keys.length, tone: "keys", keys,
+    headline: `The wallet still has ${keys.length} key${keys.length === 1 ? "" : "s"}`,
+    detail: "Someone can still sign as this account. It has not been frozen." };
+}
+
+// An agent's own account: the key it signs spend with. `wallet` is where that key is allowed
+// to call, so a key that points anywhere else is not called restricted.
+export function renderAgentKeys(list, agent, wallet) {
+  if (!list || !Array.isArray(list.keys)) return { agent, known: false, count: null, keys: [] };
+  const keys = list.keys.map((k) => describeKey(k, wallet));
+  return { agent, known: true, count: keys.length, keys };
+}

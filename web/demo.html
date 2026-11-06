@@ -1,0 +1,469 @@
+<!doctype html>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Leash · a wallet with no keys</title>
+
+<!--
+  The demo page. Ported from the Ethereum version's layout, palette and type; the data source is
+  new. It renders and it does not decide: every verdict and every reason sentence was produced
+  by the contract or the agents and is formatted by demo-render.mjs, which is pure and tested.
+
+  No indexer. Every 2 seconds it reads
+    - each agent's GET /state,
+    - the contract's views (decision_log, rule_of, spent_in_period, window_began_ms,
+      is_paused, refusal_codes) over RPC,
+    - view_access_key_list for the wallet and for each agent account.
+  Serve from the repository root so ../deployments/testnet.json resolves:
+    python3 -m http.server 8787   then open /web/demo.html
+  Optional: ?ports=8788,8789  ?wallet=<account>  ?rpc=<url>
+-->
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+<style>
+/* Petrol ground, panels one step lighter, separation by surface. Refusals are loud and
+   approvals are quiet. Same as the previous page. */
+:root {
+  --ground:#0C1619; --panel:#132227; --raised:#192C33; --line:#223A41; --line-2:#1A2E34;
+  --ink:#E8F2F1; --ink-2:#93AFB4; --ink-3:#6E888E;
+  --refuse:#FF6A4D; --allow:#6FCFA8; --human:#F2B138; --agent-2:#5EA8D8;
+  --refuse-dim:#2E1A18; --human-dim:#2A2419;
+  --sans:"Archivo","Helvetica Neue",Arial,sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,monospace;
+  --gap:12px; --pad:16px;
+}
+* { box-sizing:border-box; }
+[hidden] { display:none !important; }
+html { background:var(--ground); }
+body { margin:0; background:var(--ground); color:var(--ink); font-family:var(--sans); font-size:15px; line-height:1.5; -webkit-font-smoothing:antialiased; }
+.num,.amount,.amt { font-variant-numeric:tabular-nums; }
+.stage { padding:var(--gap); max-width:1760px; margin:0 auto; }
+.panel,.band > section { background:var(--panel); border-radius:3px; padding:var(--pad); }
+
+.band { display:grid; grid-template-columns:268px minmax(420px,1.2fr) minmax(360px,1fr); gap:var(--gap); margin-bottom:var(--gap); }
+.ident h1 { margin:0 0 2px; font-size:26px; font-weight:700; letter-spacing:-.02em; }
+.ident .wallet { font-family:var(--mono); font-size:11.5px; color:var(--ink-2); word-break:break-all; }
+.ident .beat { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-top:12px; padding-top:10px; border-top:1px solid var(--line-2); font-size:12px; color:var(--ink-3); }
+.ident .beat b { color:var(--ink-2); font-weight:500; }
+.dot { width:7px; height:7px; border-radius:50%; background:var(--allow); flex:none; }
+.dot.off { background:var(--refuse); }
+
+.ph { display:flex; align-items:baseline; gap:10px; margin-bottom:12px; }
+.ph h2 { margin:0; font-size:16px; font-weight:600; letter-spacing:-.01em; }
+.ph .sub { font-size:13px; color:var(--ink-3); }
+.ph .src { margin-left:auto; font-size:11px; color:var(--ink-3); text-align:right; }
+.pill { font-size:11px; font-weight:500; letter-spacing:.02em; padding:2px 7px; border-radius:2px; white-space:nowrap; }
+.pill.yes { background:rgba(111,207,168,.14); color:var(--allow); }
+.pill.no { background:var(--refuse-dim); color:var(--refuse); }
+.pill.wait { background:var(--human-dim); color:var(--human); }
+
+/* The headline. The widest type on the page that is not a refusal. */
+.headline .big { font-size:34px; font-weight:700; letter-spacing:-.025em; line-height:1.1; color:var(--allow); }
+.headline.keys .big { color:var(--human); }
+.headline.unknown .big { color:var(--ink-3); font-size:24px; }
+.headline .detail { font-size:14px; color:var(--ink-2); margin-top:10px; max-width:62ch; }
+.headline .proof { font-family:var(--mono); font-size:11px; color:var(--ink-3); margin-top:10px; }
+.headline .proof a { color:inherit; }
+.keyrow { font-family:var(--mono); font-size:11px; color:var(--ink-2); margin-top:6px; word-break:break-all; }
+.keyrow.bad { color:var(--human); }
+
+.gauge .big { display:flex; align-items:baseline; gap:8px; font-size:22px; font-weight:600; letter-spacing:-.01em; }
+.gauge .big .of { font-size:14px; font-weight:400; color:var(--ink-3); }
+.gauge .big .pct { margin-left:auto; font-size:14px; color:var(--ink-2); }
+.bar { display:flex; height:10px; border-radius:2px; background:var(--line-2); overflow:hidden; margin:10px 0 12px; }
+.bar i { display:block; height:10px; min-width:2px; }
+.c0 { background:var(--allow); } .c1 { background:var(--agent-2); } .cx { background:var(--ink-3); }
+.split-row { display:flex; align-items:center; gap:9px; font-size:13px; padding:3px 0; }
+.split-row .sw { width:9px; height:9px; border-radius:2px; flex:none; }
+.split-row .ad { font-family:var(--mono); font-size:11px; color:var(--ink-3); }
+.split-row .am { margin-left:auto; font-weight:500; }
+.note { font-size:12px; color:var(--ink-3); line-height:1.5; margin:8px 0 0; }
+.note b { color:var(--ink-2); }
+
+.cols { display:grid; grid-template-columns:minmax(330px,1fr) minmax(460px,1.4fr) minmax(320px,1fr); gap:var(--gap); align-items:start; }
+.col { display:grid; gap:var(--gap); }
+
+/* one card per agent: what it understood, then what the chain said */
+.acard { background:var(--ground); border-radius:2px; padding:12px 14px; margin-bottom:10px; box-shadow:inset 3px 0 0 var(--line); display:grid; gap:7px; }
+.acard.down { opacity:.55; }
+.acard .head { display:flex; align-items:baseline; gap:10px; }
+.acard .nm { font-size:15px; font-weight:600; }
+.acard .ad { font-family:var(--mono); font-size:10.5px; color:var(--ink-3); }
+.acard .status { margin-left:auto; font-size:12px; font-weight:600; letter-spacing:.03em; }
+.acard .understood { font-size:14px; }
+.acard .understood small { display:block; font-size:11px; color:var(--ink-3); margin-bottom:1px; }
+.acard .why { font-size:13px; color:var(--ink-2); line-height:1.5; }
+.acard .reason { font-size:16px; font-weight:600; color:var(--refuse); }
+.acard .reason small { font-family:var(--mono); font-size:11px; font-weight:400; margin-left:8px; }
+.acard .tx { font-family:var(--mono); font-size:11px; color:var(--ink-3); }
+.acard .txnote { font-size:12px; color:var(--ink-2); background:var(--raised); border-radius:2px; padding:7px 9px; line-height:1.45; }
+.acard .keyrow { margin-top:0; }
+.acard.t-refused { background:var(--raised); box-shadow:inset 3px 0 0 var(--refuse); }
+.acard.t-refused .status { color:var(--refuse); }
+.acard.t-allowed { box-shadow:inset 3px 0 0 var(--allow); }
+.acard.t-allowed .status { color:var(--allow); }
+.acard.t-pending { box-shadow:inset 3px 0 0 var(--human); }
+.acard.t-pending .status { color:var(--human); }
+.acard.t-unresolved,.acard.t-failed { box-shadow:inset 3px 0 0 var(--human); background:var(--human-dim); }
+.acard.t-unresolved .status,.acard.t-failed .status { color:var(--human); }
+.acard.t-unresolved .reason,.acard.t-failed .reason { color:var(--human); }
+.empty { font-size:13px; color:var(--ink-3); }
+
+.ask { display:flex; gap:8px; margin-top:6px; }
+.ask select,.ask input { background:var(--ground); border:1px solid var(--line); border-radius:2px; padding:10px; color:var(--ink); font:inherit; }
+.ask input { flex:1; min-width:0; }
+.ask input:focus { outline:2px solid var(--allow); outline-offset:-1px; border-color:transparent; }
+.ask button { appearance:none; cursor:pointer; font:inherit; font-weight:600; background:var(--allow); color:#06201A; border:0; border-radius:2px; padding:0 18px; }
+.ask button:disabled { background:var(--line); color:var(--ink-3); cursor:wait; }
+.askMsg { font-size:12px; color:var(--ink-2); margin-top:9px; min-height:16px; }
+.askMsg.bad { color:var(--refuse); }
+
+.banner { background:var(--human-dim); border-radius:2px; padding:10px 12px; margin-bottom:12px; font-size:13px; color:var(--ink-2); }
+.banner strong { color:var(--human); }
+
+/* the log rows */
+.rowd { display:grid; grid-template-columns:78px 1fr auto; gap:3px 10px; padding:9px 0; border-bottom:1px solid var(--line-2); font-size:13px; }
+.rowd:last-child { border-bottom:0; }
+.rowd .who { font-size:12px; font-weight:600; color:var(--ink-2); }
+.rowd .line2 { font-family:var(--mono); font-size:11px; color:var(--ink-3); grid-column:2 / 4; word-break:break-all; }
+.rowd .amt { font-weight:600; text-align:right; }
+.rowd .rsn { color:var(--refuse); font-weight:600; }
+.rowd .st { font-size:11px; font-weight:600; letter-spacing:.03em; }
+.rowd.refused .st { color:var(--refuse); } .rowd.allowed .st { color:var(--allow); } .rowd.failed .st { color:var(--human); }
+.rowd .nonode { color:var(--human); }
+.ringhead { display:flex; align-items:baseline; gap:10px; margin:0 0 6px; }
+.ringhead h3 { margin:0; font-size:14px; font-weight:600; }
+.ringhead .src { margin-left:auto; font-size:11px; color:var(--ink-3); }
+.strangers { margin-top:16px; padding-top:14px; border-top:1px solid var(--line-2); }
+.foot { font-size:11.5px; color:var(--ink-3); line-height:1.5; margin-top:12px; }
+.foot b { color:var(--ink-2); }
+
+.codes { width:100%; border-collapse:collapse; font-size:12px; }
+.codes td { padding:4px 0; border-bottom:1px solid var(--line-2); color:var(--ink-2); }
+.codes td:first-child { font-family:var(--mono); color:var(--ink-3); width:28px; }
+.kv { display:flex; gap:10px; justify-content:space-between; font-size:13px; padding:3px 0; color:var(--ink-2); }
+.kv b { color:var(--ink); font-weight:500; text-align:right; word-break:break-all; }
+
+@media (max-width:1180px) { .band,.cols { grid-template-columns:1fr; } }
+@media (prefers-reduced-motion:reduce) { * { transition:none !important; animation:none !important; } }
+</style>
+
+<div class="stage">
+  <div class="band">
+    <section class="ident">
+      <h1>Leash</h1>
+      <div class="wallet" id="whoWallet">—</div>
+      <div class="beat">
+        <span id="link" class="dot off"></span>
+        <span>poll <b id="tick">—</b></span>
+        <span><b id="clock">—</b></span>
+        <span id="paused"></span>
+      </div>
+    </section>
+
+    <section class="headline unknown" id="headline">
+      <div class="ph"><h2>The account that holds the money</h2><span class="src">read from RPC, not from the contract</span></div>
+      <div class="big" id="hlBig">reading the wallet's keys…</div>
+      <div class="detail" id="hlDetail"></div>
+      <div id="hlKeys"></div>
+      <div class="proof" id="hlProof"></div>
+    </section>
+
+    <section class="gauge">
+      <div class="ph"><h2>One budget, two agents</h2><span class="src">the two accounts share a parent, so they share a rule</span></div>
+      <div class="big">
+        <b id="budgetSpent">—</b>
+        <span class="of">of <b id="budgetLimit">—</b> USDC this period</span>
+        <span class="pct" id="budgetPct">—</span>
+      </div>
+      <div id="budgetBar" class="bar"></div>
+      <div id="split"></div>
+      <p class="note" id="budgetNote"></p>
+    </section>
+  </div>
+
+  <div class="cols">
+    <div class="col">
+      <section class="panel">
+        <div class="ph"><h2>The agents</h2><span class="sub">two processes, no channel</span></div>
+        <div id="agents"><div class="empty">waiting for the agents…</div></div>
+        <form id="askForm" class="ask">
+          <select id="askWho" aria-label="which agent"></select>
+          <input id="ask" autocomplete="off" spellcheck="false" placeholder="e.g. pay 0.50 USDC to Acme Studio" />
+          <button id="askGo" type="submit">Ask</button>
+        </form>
+        <div id="askMsg" class="askMsg"></div>
+        <p class="note">The card shows what the agent <b>understood</b> before it sent, and keeps it after the chain answers. A misreading is visible, not silent.</p>
+      </section>
+    </div>
+
+    <div class="col">
+      <section class="panel" id="logPanel">
+        <div class="ph"><h2>What the chain decided</h2><span class="sub">decision_log(), newest first</span></div>
+        <div id="stale" class="banner" hidden></div>
+        <div class="ringhead"><h3>Agents with a rule</h3><span class="src" id="agentsCount"></span></div>
+        <div id="decisions"><div class="empty">nothing yet</div></div>
+        <div class="strangers">
+          <div class="ringhead"><h3>Strangers</h3><span class="src" id="strangersCount"></span></div>
+          <div id="strangers"><div class="empty">no stranger has called spend</div></div>
+          <div class="foot">Anyone can call <code>spend</code>. A caller with no rule is refused and kept in its own small ring, so a flood from a stranger can only push out other strangers, never the agents' evidence. A refusal here is part of the story.</div>
+        </div>
+        <div class="foot">
+          <b>Every refusal is a successful transaction.</b> The contract returns the refusal instead of reverting, so the explorer shows a green tick next to a payment that did not happen. That is the design: a revert would roll the record back and leave no reason on-chain. The sentences on this page come from the contract, not from this page. Rows from the log carry no transaction hash; the card on the left links the one the agent just sent.
+          <a id="walletLink" target="_blank" rel="noopener" style="color:inherit">All wallet transactions</a>
+        </div>
+      </section>
+    </div>
+
+    <div class="col">
+      <section class="panel">
+        <div class="ph"><h2>The rule in force</h2><span class="src" id="ruleNode">—</span></div>
+        <div id="rule"></div>
+      </section>
+      <section class="panel">
+        <div class="ph"><h2>Where the agents' keys live</h2><span class="src">view_access_key_list on each agent</span></div>
+        <div id="agentKeys"></div>
+        <p class="note">Each agent holds one key that can call <b>spend</b> and nothing else, on its own account.</p>
+      </section>
+      <section class="panel">
+        <div class="ph"><h2>Why a payment is refused</h2><span class="src">refusal_codes(), from the contract</span></div>
+        <table class="codes" id="codes"></table>
+      </section>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+  import { callView, accessKeys, DEFAULT_RPC } from "./near.mjs";
+  import {
+    shortId, formatUsdc, renderAction, renderDecisions, renderBudget, renderWalletKeys,
+    renderAgentKeys, accountUrl,
+  } from "./demo-render.mjs";
+
+  const $ = (id) => document.getElementById(id);
+  const q = new URLSearchParams(location.search);
+  const RPC = q.get("rpc") || DEFAULT_RPC;
+  const PORTS = (q.get("ports") || "8788,8789").split(",").map(Number);
+  const POLL_MS = 2000;
+
+  // Text only, never innerHTML: names and reasons arrive from the network.
+  function h(tag, cls, text, ...kids) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    for (const k of kids) if (k) e.append(k);
+    return e;
+  }
+
+  let dep = null;
+  try { dep = await (await fetch("../deployments/testnet.json")).json(); } catch { /* ?wallet= may cover it */ }
+  const WALLET = q.get("wallet") || dep?.wallet;
+  if (!WALLET) {
+    $("hlBig").textContent = "no wallet configured";
+    $("hlDetail").textContent = "Serve from the repository root so ../deployments/testnet.json resolves, or pass ?wallet=<account>.";
+    throw new Error("no wallet");
+  }
+  $("whoWallet").textContent = WALLET;
+  $("walletLink").href = accountUrl(WALLET);
+
+  const view = (m, a) => callView(RPC, WALLET, m, a);
+  let n = 0;
+  const lastGood = { reasons: null, keys: null };
+  const known = PORTS.map(() => null);
+  let inFlight = false;
+
+  async function agentState(port) {
+    const res = await fetch(`http://localhost:${port}/state`, { cache: "no-store", signal: AbortSignal.timeout(POLL_MS) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  }
+
+  async function poll() {
+    if (inFlight) return;
+    inFlight = true;
+    const problems = [];
+    try {
+      const states = await Promise.all(PORTS.map((p) => agentState(p).catch((e) => ({ __down: e.message }))));
+      states.forEach((s, i) => { if (!s.__down && s.agentAddr) known[i] = { name: s.name, addr: s.agentAddr }; });
+      const node = states.find((s) => !s.__down)?.cohort?.node || dep?.budget_node || null;
+      const agentAddrs = known.map((k) => k?.addr).filter(Boolean);
+      const once = async (label, p) => { try { return await p; } catch (e) { problems.push(`${label}: ${e.message}`); return undefined; } };
+
+      // Public RPCs do rate-limit (the near.org one answered 429 while this was written), so the
+      // page spends as few calls as it can: three per poll, plus the key lists every fifth poll
+      // and the refusal table until it has been read once. node_record is one contract view
+      // carrying the rule, the window start and what is spent in it.
+      const keysDue = n % 5 === 0 || !lastGood.keys;
+      const [log, reasons, paused, rec, wkeys, ...akeys] = await Promise.all([
+        once("decision_log", view("decision_log")),
+        lastGood.reasons ? null : once("refusal_codes", view("refusal_codes")),
+        once("is_paused", view("is_paused")),
+        node ? once("node_record", view("node_record", { node })) : null,
+        keysDue ? once("wallet keys", accessKeys(RPC, WALLET)) : lastGood.keys.wallet,
+        ...agentAddrs.map((a, i) => (keysDue ? once(`${a} keys`, accessKeys(RPC, a)) : lastGood.keys.agents[i])),
+      ]);
+      if (keysDue && wkeys) lastGood.keys = { wallet: wkeys, agents: akeys };
+      const rule = rec?.rule ?? null, spent = rec?.spent ?? null, began = rec?.window_began_ms ?? null;
+      if (reasons) lastGood.reasons = reasons;
+      const reasonTable = lastGood.reasons;
+
+      $("link").classList.toggle("off", problems.length > 0 || states.some((s) => s.__down));
+      $("tick").textContent = ++n;
+      $("clock").textContent = new Date().toTimeString().slice(0, 8);
+      $("paused").textContent = paused === true ? "PAUSED" : "";
+
+      paintHeadline(wkeys ? renderWalletKeys(wkeys, WALLET) : renderWalletKeys(null, WALLET));
+      paintAgents(states, reasonTable);
+      paintAskSelect();
+      if (log) paintLog(renderDecisions(log, reasonTable));
+      // undefined means the read failed: keep what is on screen (the banner says so) rather than
+      // painting "no rule". null means the chain answered that there is none.
+      if (rec !== undefined) {
+        paintBudget(renderBudget({ rule, spent, windowBeganMs: began, log }), rule);
+        paintRule(rule, node);
+      }
+      if (!akeys.includes(undefined)) paintAgentKeys(agentAddrs, akeys);
+      paintCodes(reasonTable);
+
+      const down = states.map((s, i) => (s.__down ? `${known[i]?.name ?? "agent on :" + PORTS[i]} (${s.__down})` : null)).filter(Boolean);
+      const stale = $("stale");
+      const msgs = [...problems, ...down.map((d) => `agent not answering: ${d}`)];
+      stale.hidden = msgs.length === 0;
+      if (msgs.length) {
+        stale.replaceChildren(h("strong", null, "some reads failed. "), document.createTextNode(msgs.join(" · ") + ". What is shown for those is the last thing read, not the present."));
+      }
+    } finally { inFlight = false; }
+  }
+
+  function paintHeadline(w) {
+    $("headline").className = `headline ${w.tone}`;
+    $("hlBig").textContent = w.headline;
+    $("hlDetail").textContent = w.detail;
+    $("hlKeys").replaceChildren(...w.keys.map((k) => h("div", "keyrow bad", `${k.key} · ${k.kind}`)));
+    $("hlProof").textContent = w.known ? `view_access_key_list(${WALLET}) → ${w.count} key${w.count === 1 ? "" : "s"}` : "";
+  }
+
+  function paintAgents(states, reasons) {
+    const el = $("agents");
+    const cards = states.map((s, i) => {
+      const id = s.__down ? known[i] : { name: s.name, addr: s.agentAddr };
+      const a = s.__down ? null : renderAction(s.lastAction, reasons);
+      const card = h("div", `acard${s.__down ? " down" : ""}${a ? " t-" + a.tone : ""}`);
+      card.append(h("div", "head", null, h("span", "nm", id?.name ?? `agent on :${PORTS[i]}`), h("span", "ad", shortId(id?.addr)),
+        h("span", "status", s.__down ? "OFFLINE" : a ? a.label : "idle")));
+      if (s.__down) { card.append(h("div", "why", `not answering: ${s.__down}. The chain is unaffected.`)); return card; }
+      if (!a) { card.append(h("div", "why", "nothing proposed yet")); return card; }
+      const u = h("div", "understood", a.understood, h("small", null, "what the agent understood"));
+      u.prepend(u.lastChild);
+      card.append(u);
+      if (a.reason) {
+        card.append(h("div", "reason", a.reason, a.code != null ? h("small", null, `code ${a.code}`) : null));
+      }
+      card.append(h("div", "why", a.note));
+      if (a.txUrl) {
+        const link = h("a", null, a.txShort);
+        link.href = a.txUrl; link.target = "_blank"; link.rel = "noopener"; link.style.color = "inherit";
+        card.append(h("div", "tx", "tx ", link));
+      }
+      if (a.txNote) card.append(h("div", "txnote", a.txNote));
+      if (a.settledBy === "return-value") card.append(h("div", "why", "settled from spend's return value; the log had not caught up when last read"));
+      return card;
+    });
+    el.replaceChildren(...cards);
+  }
+
+  function paintAskSelect() {
+    const sel = $("askWho");
+    const sig = known.map((k) => k?.name ?? "").join("|");
+    if (sel.dataset.sig === sig) return;
+    sel.dataset.sig = sig;
+    const cur = sel.value;
+    sel.replaceChildren(...known.map((k, i) => { const o = h("option", null, k?.name ?? `:${PORTS[i]}`); o.value = i; return o; }));
+    if (cur) sel.value = cur;
+  }
+
+  function logRow(r) {
+    const who = h("div", "who", r.agent.split(".")[0]);
+    const mid = h("div", null, null);
+    if (r.status === "refused") mid.append(h("span", "rsn", r.reason ?? "refused"), h("span", "st", `  code ${r.code}`));
+    else mid.append(h("span", "st", r.status.toUpperCase()));
+    const right = h("div", "amt num", `${r.amount} USDC`);
+    const l2 = h("div", "line2", `${r.agent} → ${r.payee} · budget `);
+    l2.append(h("span", r.node == null ? "nonode" : null, r.node == null ? r.nodeLabel : r.node), document.createTextNode(` · ${r.ago}`));
+    return h("div", `rowd ${r.status}`, null, who, mid, right, l2);
+  }
+
+  function paintLog(r) {
+    $("decisions").replaceChildren(...(r.agents.length ? r.agents.map(logRow) : [h("div", "empty", "nothing yet")]));
+    $("strangers").replaceChildren(...(r.strangers.length ? r.strangers.map(logRow) : [h("div", "empty", "no stranger has called spend")]));
+    $("agentsCount").textContent = `${r.agentCount} ever${r.agentsDropped ? `, last ${r.agents.length} shown` : ""}`;
+    $("strangersCount").textContent = `${r.strangerCount} ever${r.strangersDropped ? `, last ${r.strangers.length} shown` : ""}`;
+  }
+
+  function paintBudget(b, rule) {
+    $("budgetSpent").textContent = b.spent;
+    $("budgetLimit").textContent = b.limit;
+    $("budgetPct").textContent = b.hasRule ? `${b.pct}%` : "—";
+    const colorOf = (s, i) => (s.agent == null ? "cx" : `c${i % 2}`);
+    $("budgetBar").replaceChildren(...b.segments.map((s, i) => { const e = h("i", colorOf(s, i)); e.style.width = `${Math.min(100, s.pct)}%`; e.title = `${s.label}: ${s.amount} USDC`; return e; }));
+    $("split").replaceChildren(...b.segments.map((s, i) => {
+      const sw = h("span", "sw"); sw.classList.add(colorOf(s, i));
+      return h("div", "split-row", null, sw, h("span", null, s.agent ? s.agent.split(".")[0] : s.label), s.agent ? h("span", "ad", s.agent) : null, h("span", "am num", `${s.amount}`));
+    }));
+    $("budgetNote").textContent = !b.hasRule ? "this node has no rule" : b.segments.length === 0 ? "nothing spent in this window" :
+      "One rule, one ledger. Neither agent knows the other exists; the contract reads the shared parent off their account ids." + (b.overAttributed ? " The log and the total were read a moment apart and disagree slightly." : "");
+  }
+
+  function paintRule(rule, node) {
+    $("ruleNode").textContent = node ? shortId(node) : "—";
+    if (!rule) { $("rule").replaceChildren(h("div", "empty", "no rule for this node")); return; }
+    const kv = (k, v) => h("div", "kv", k, h("b", null, v));
+    $("rule").replaceChildren(
+      kv("per payment", `${formatUsdc(rule.per_tx_limit)} USDC`),
+      kv("per period", `${formatUsdc(rule.period_limit)} USDC`),
+      kv("period", `${Math.round(rule.period_ms / 3600000)} h`),
+      kv("token", shortId(rule.token)),
+      kv("paused", rule.paused ? "yes" : "no"),
+      kv("allowed payees", ""),
+      ...(rule.payees ?? []).map((p) => h("div", "keyrow", p)),
+    );
+  }
+
+  function paintAgentKeys(addrs, lists) {
+    $("agentKeys").replaceChildren(...addrs.map((a, i) => {
+      const k = renderAgentKeys(lists[i], a, WALLET);
+      const box = h("div", null, null, h("div", "kv", a.split(".")[0], h("b", null, k.known ? `${k.count} key${k.count === 1 ? "" : "s"}` : "unreadable")));
+      for (const key of k.keys) box.append(h("div", key.restricted ? "keyrow" : "keyrow bad", `${key.key} · ${key.kind}`));
+      return box;
+    }));
+  }
+
+  function paintCodes(reasons) {
+    $("codes").replaceChildren(...(reasons ?? []).map((r) => { const tr = document.createElement("tr"); tr.append(h("td", null, String(r.code)), h("td", null, r.reason)); return tr; }));
+  }
+
+  $("askForm").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const text = $("ask").value.trim();
+    if (!text) return;
+    const port = PORTS[Number($("askWho").value)];
+    $("askGo").disabled = true;
+    $("askMsg").className = "askMsg";
+    $("askMsg").textContent = "sent to the agent; the card shows its state as it moves";
+    try {
+      const res = await fetch(`http://localhost:${port}/instruct`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text }) });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
+      $("ask").value = "";
+      $("askMsg").textContent = "";
+    } catch (err) {
+      $("askMsg").className = "askMsg bad";
+      $("askMsg").textContent = String(err.message ?? err);
+    } finally { $("askGo").disabled = false; poll(); }
+  });
+
+  poll();
+  setInterval(poll, POLL_MS);
+</script>
