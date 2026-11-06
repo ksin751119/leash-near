@@ -15,7 +15,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { decide, formatUnits, parseUnits } from "./decide.mjs";
-import { readLog as chainLog, readView as chainView } from "./chain.mjs";
+import { readLog as chainLog, readView as chainView, makeReader } from "./chain.mjs";
 import { sendSpend } from "./send.mjs";
 import { parseInstruction } from "./parse.mjs";
 
@@ -62,6 +62,31 @@ export function settle(action, chain) {
   return hit ? { ...action, ...fromRecord(hit), settledBy: "chain" } : action;
 }
 
+// Which transaction caused which decision. The contract cannot record its own transaction hash
+// (NEAR gives a contract no access to it), so the chain has none to offer; but this process knows
+// the hash of every payment it sent. A decision is matched to an attempt the same way settle()
+// does: same agent, payee and amount, among the entries written since the attempt began. Each
+// decision is claimed by at most one attempt, oldest first. Keys are "<agent>|<timestamp_ms>".
+// Only this agent's own attempts are here: another agent's decisions, and strangers', have no
+// hash from this process, and the page says so.
+export function matchTxs(sent, chain) {
+  const out = {};
+  const claimed = new Set();
+  const key = (e) => `${e.agent}|${e.timestamp_ms}`;
+  for (const a of sent) {
+    if (!a.tx) continue;
+    const known = a.countBefore != null && a.strangersBefore != null;
+    const newer = (list, count, before) => list.slice(0, Math.max(0, count - before));
+    const pool = known
+      ? [...newer(chain.decisions, chain.decision_count, a.countBefore), ...newer(chain.strangers, chain.stranger_count, a.strangersBefore)]
+      : [...chain.decisions, ...chain.strangers].filter((e) => e.timestamp_ms >= a.at - CLOCK_SKEW_MS);
+    // newest first, so the last match is the oldest unclaimed one
+    const hit = [...pool].reverse().find((e) => sameAttempt(e, a) && !claimed.has(key(e)));
+    if (hit) { claimed.add(key(hit)); out[key(hit)] = a.tx; }
+  }
+  return out;
+}
+
 // Sends one payment and leaves state.lastAction in a final state no matter how it ends.
 export async function sendAndRecord(state, intent, { send, readLog }) {
   const attempt = { agent: intent.agent, payee: intent.payee, amount: String(intent.amount) };
@@ -99,6 +124,10 @@ export async function sendAndRecord(state, intent, { send, readLog }) {
       next = { ...next, status: "unknown", reason: "sent, but the chain has not recorded it yet" };
     }
     state.lastAction = next;
+    if (action.tx) {
+      (state.sent ??= []).push({ ...attempt, tx: action.tx, at: action.at, countBefore: action.countBefore, strangersBefore: action.strangersBefore });
+      if (state.sent.length > 40) state.sent.shift();
+    }
   } catch (err) {
     state.lastAction = { ...action, status: "error", reason: String(err.message ?? err).slice(0, 300) };
   }
@@ -148,6 +177,22 @@ export function publicState(state, chain, view) {
       agents: [...new Set(recent.map((r) => r.agent))],
       recent,
     },
+    // The chain's own answers, passed through as read, so the page needs no RPC of its own for
+    // them. `readAt` says how old each is (epoch ms); `errors` lists views currently failing, in
+    // which case the value is the last good one.
+    chain: {
+      node: view.node,
+      rule,
+      spent: view.spent,
+      windowBeganMs: view.windowBeganMs ?? null,
+      paused: view.accountPaused ?? null,
+      reasons: view.reasons,
+      log: chain,
+      readAt: view.readAt ?? null,
+      keys: view.keys ?? null,
+      errors: view.errors ?? [],
+    },
+    txs: matchTxs(state.sent ?? [], chain),
     refusals: {
       agents: recent.filter((r) => r.status === "refused"),
       decisionCount: chain.decision_count,
@@ -193,8 +238,13 @@ function config() {
 
 export function start(cfg = config()) {
   const state = { name: cfg.name, agentAddr: cfg.agentAddr, lastAction: null };
-  const readView = () => chainView({ wallet: cfg.wallet, agent: cfg.agentAddr, units: cfg.units });
-  const readLog = () => chainLog(cfg.wallet);
+  // One reader per process, with the call budget described in chain.mjs.
+  const reader = makeReader({ swr: true });
+  const readView = (opts = {}) => chainView({ wallet: cfg.wallet, agent: cfg.agentAddr, units: cfg.units, reader, ...opts });
+  const readLog = () => chainLog(cfg.wallet, reader);
+  // Around a send the log must be current, not up to 5 s old: the pre-send count decides which
+  // entries are "mine".
+  const readLogFresh = () => chainLog(cfg.wallet, reader, { fresh: true });
   const send = (i) => sendSpend({ network: cfg.network, wallet: cfg.wallet, agent: cfg.agentAddr, keyFile: cfg.keyFile, token: i.token, payee: i.payee, amount: i.amount });
 
   const json = (res, code, body) => {
@@ -208,11 +258,27 @@ export function start(cfg = config()) {
     req.on("error", no);
   });
 
+  // Warm the cache so the first /state does not pay for every cold read in sequence.
+  Promise.all([readLog(), readView(), reader.call(cfg.wallet, "view_access_key_list"), reader.call(cfg.agentAddr, "view_access_key_list")]).catch(() => {});
+
   return createServer(async (req, res) => {
     try {
       if (req.method === "OPTIONS") return json(res, 204, {});
       if (req.method === "GET" && req.url === "/state") {
         const [chain, view] = await Promise.all([readLog(), readView()]);
+        view.readAt = {
+          decision_log: reader.readAt(cfg.wallet, "decision_log"),
+          node_record: view.node ? reader.readAt(cfg.wallet, "node_record", { node: view.node }) : null,
+          is_paused: reader.readAt(cfg.wallet, "is_paused"),
+        };
+        // Key lists, from the same reader (30 s cache). Failure leaves the field null, never empty:
+        // an unreadable list must not turn into "zero keys" on the page.
+        const keyOf = async (account) => {
+          try { return { account, list: await reader.call(account, "view_access_key_list"), at: reader.readAt(account, "view_access_key_list") }; }
+          catch { return null; }
+        };
+        view.keys = { wallet: await keyOf(cfg.wallet), self: await keyOf(cfg.agentAddr) };
+        view.errors = reader.errors();
         return json(res, 200, publicState(state, chain, view));
       }
       if (req.method === "POST" && req.url === "/instruct") {
@@ -224,7 +290,8 @@ export function start(cfg = config()) {
         intent.prediction = decide(await readView(), intent);
         // Sends whatever the prediction says: the chain is what refuses, and the refusal is
         // the thing worth recording.
-        const done = await sendAndRecord(state, intent, { send, readLog });
+        const done = await sendAndRecord(state, intent, { send, readLog: readLogFresh });
+        readView({ fresh: true }).catch(() => {}); // the budget just moved; refresh what /state serves
         return json(res, 200, { prediction: intent.prediction, lastAction: done });
       }
       json(res, 404, { error: "not found" });

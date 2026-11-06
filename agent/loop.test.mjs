@@ -81,7 +81,7 @@ test("/state keeps strangers apart from agents and renders a null node as null",
   assert.equal(s.refusals.strangers[0].ring, "strangers");
   assert.equal(s.refusals.agents[0].ring, "decisions");
   assert.equal(s.refusals.strangerCount, 9);
-  assert.deepEqual(Object.keys(s).sort(), ["agentAddr", "cohort", "lastAction", "name", "refusals"]);
+  assert.deepEqual(Object.keys(s).sort(), ["agentAddr", "chain", "cohort", "lastAction", "name", "refusals", "txs"]);
   assert.equal(s.cohort.node, NODE);
   assert.equal(s.cohort.left, "3.00");
 });
@@ -161,4 +161,60 @@ test("what the agent understood is on lastAction from the moment it is in flight
   assert.equal(during.status, "in-flight");
   assert.equal(during.understood, "paying 5.00 USDC to Acme Studio (a.testnet)");
   assert.equal(state.lastAction.understood, during.understood);
+});
+
+// --- which transaction caused which decision ---------------------------------------------
+
+import { matchTxs } from "./loop.mjs";
+
+test("a sent payment is linked to the decision it caused, by agent, payee and amount", () => {
+  const e = entry({ amount: "5000000", timestamp_ms: 111 });
+  const chain = log({ decisions: [e], decision_count: 4 });
+  const sent = [{ agent: ALPHA, payee: PAY1, amount: "5000000", tx: "TXA", at: 100, countBefore: 3, strangersBefore: 0 }];
+  assert.deepEqual(matchTxs(sent, chain), { [`${ALPHA}|111`]: "TXA" });
+});
+
+test("a decision from before the attempt is never claimed by it", () => {
+  const old = entry({ amount: "5000000", timestamp_ms: 50 });
+  const chain = log({ decisions: [old], decision_count: 3 });
+  const sent = [{ agent: ALPHA, payee: PAY1, amount: "5000000", tx: "TXA", at: 100, countBefore: 3, strangersBefore: 0 }];
+  assert.deepEqual(matchTxs(sent, chain), {});
+});
+
+test("two identical payments each get their own transaction", () => {
+  const first = entry({ amount: "5000000", timestamp_ms: 111 });
+  const second = entry({ amount: "5000000", timestamp_ms: 222 });
+  const chain = log({ decisions: [second, first], decision_count: 5 });
+  const base = { agent: ALPHA, payee: PAY1, amount: "5000000" };
+  const sent = [
+    { ...base, tx: "TX1", at: 100, countBefore: 3, strangersBefore: 0 },
+    { ...base, tx: "TX2", at: 200, countBefore: 4, strangersBefore: 0 },
+  ];
+  assert.deepEqual(matchTxs(sent, chain), { [`${ALPHA}|111`]: "TX1", [`${ALPHA}|222`]: "TX2" });
+});
+
+test("an attempt with no transaction hash links nothing", () => {
+  const chain = log({ decisions: [entry({ amount: "5000000" })], decision_count: 4 });
+  assert.deepEqual(matchTxs([{ agent: ALPHA, payee: PAY1, amount: "5000000", tx: null, at: 1, countBefore: 3, strangersBefore: 0 }], chain), {});
+});
+
+test("/state passes the chain's own answers through for the page", () => {
+  const chain = log({ decisions: [entry()], decision_count: 1 });
+  const s = publicState({ name: "p", agentAddr: ALPHA, lastAction: null }, chain, view({ windowBeganMs: 5, accountPaused: false, readAt: { decision_log: 1 }, errors: [] }));
+  assert.deepEqual(s.chain.reasons, view().reasons);
+  assert.equal(s.chain.windowBeganMs, 5);
+  assert.equal(s.chain.paused, false);
+  assert.equal(s.chain.log, chain);
+  assert.equal(s.chain.rule.period_limit, "10000000");
+});
+
+test("sendAndRecord keeps the transaction hash of what it sent, with the counts it needs to match it later", async () => {
+  const state = { name: "p", agentAddr: ALPHA, lastAction: null };
+  await sendAndRecord(state, { agent: ALPHA, payee: PAY1, amount: 5_000_000n, token: TOKEN }, {
+    send: async () => ({ txHash: "TXSENT", outcome: { status: "refused", code: 5, reason: "x" } }),
+    readLog: async () => log({ decision_count: 3 }),
+  });
+  assert.equal(state.sent.length, 1);
+  assert.equal(state.sent[0].tx, "TXSENT");
+  assert.equal(state.sent[0].countBefore, 3);
 });

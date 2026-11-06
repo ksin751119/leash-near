@@ -291,3 +291,32 @@ test("a spend key pointed at some other account is not called restricted", () =>
   const list = { keys: [{ public_key: "ed25519:2PR2G", access_key: { permission: { FunctionCall: { receiver_id: "elsewhere.testnet", method_names: ["spend"] } } } }] };
   assert.equal(renderAgentKeys(list, ALPHA, WALLET).keys[0].restricted, false);
 });
+
+// --- linking a log row to its transaction ---------------------------------------------
+
+test("a row the agent sent links to its transaction", () => {
+  const log = { decisions: [refused(4, "payee is not on the allow-list", { agent: BETA, timestamp_ms: 4242 })], decision_count: 1, strangers: [], stranger_count: 0 };
+  const row = renderDecisions(log, REASONS, 5000, { [`${BETA}|4242`]: "TXHASH" }).agents[0];
+  assert.equal(row.txUrl, txUrl("TXHASH"));
+  assert.equal(row.noLink, null);
+});
+
+test("a row nobody here sent says why it has no link instead of a dead affordance", () => {
+  const log = { decisions: [dec({ timestamp_ms: 1 })], decision_count: 1, strangers: [refused(1, "no rule for this agent's node", { agent: "x.testnet", timestamp_ms: 2 })], stranger_count: 1 };
+  const r = renderDecisions(log, REASONS, 5000, {});
+  assert.equal(r.agents[0].txUrl, null);
+  assert.match(r.agents[0].noLink, /no transaction link/i);
+  assert.equal(r.strangers[0].txUrl, null);
+  assert.match(r.strangers[0].noLink, /stranger/i);
+});
+
+// --- how old the chain read is --------------------------------------------------------
+
+import { renderAge } from "./demo-render.mjs";
+
+test("renderAge says how old a read is, and says nothing was read when it was not", () => {
+  assert.equal(renderAge(1000, 1000), "just now");
+  assert.equal(renderAge(1000, 8000), "7s ago");
+  assert.equal(renderAge(1000, 125000), "2m ago");
+  assert.equal(renderAge(null, 5000), "not read yet");
+});

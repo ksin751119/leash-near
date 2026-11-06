@@ -8,14 +8,17 @@
   new. It renders and it does not decide: every verdict and every reason sentence was produced
   by the contract or the agents and is formatted by demo-render.mjs, which is pure and tested.
 
-  No indexer. Every 2 seconds it reads
-    - each agent's GET /state,
-    - the contract's views (decision_log, rule_of, spent_in_period, window_began_ms,
-      is_paused, refusal_codes) over RPC,
-    - view_access_key_list for the wallet and for each agent account.
+  No indexer. Every 2 seconds it polls each agent's GET /state, which carries the chain's own
+  answers (decision_log, node_record, is_paused, refusal_codes) from that agent's cached reader
+  (call budget: agent/chain.mjs, about one RPC call per second across every process at idle), plus
+  which transaction each of the agent's decisions came from. The page's own RPC calls are only
+  view_access_key_list for the wallet and each agent account (no contract method can list keys),
+  at load and every 30 s, stamped on screen with when they were last confirmed.
   Serve from the repository root so ../deployments/testnet.json resolves:
     python3 -m http.server 8787   then open /web/demo.html
-  Optional: ?ports=8788,8789  ?wallet=<account>  ?rpc=<url>
+  Optional: ?ports=8788,8789  ?wallet=<account>
+    ?rpc=<url>  overrides the endpoint for the key-list reads only (a backstop, not the plan).
+    The agents' own endpoint is NEAR_RPC in their environment.
 -->
 
 <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -97,6 +100,7 @@ body { margin:0; background:var(--ground); color:var(--ink); font-family:var(--s
 .acard .why { font-size:13px; color:var(--ink-2); line-height:1.5; }
 .acard .reason { font-size:16px; font-weight:600; color:var(--refuse); }
 .acard .reason small { font-family:var(--mono); font-size:11px; font-weight:400; margin-left:8px; }
+.acard .tx a { color:var(--ink-2); }
 .acard .tx { font-family:var(--mono); font-size:11px; color:var(--ink-3); }
 .acard .txnote { font-size:12px; color:var(--ink-2); background:var(--raised); border-radius:2px; padding:7px 9px; line-height:1.45; }
 .acard .keyrow { margin-top:0; }
@@ -126,7 +130,7 @@ body { margin:0; background:var(--ground); color:var(--ink); font-family:var(--s
 /* the log rows */
 .rowd { display:grid; grid-template-columns:78px 1fr auto; gap:3px 10px; padding:9px 0; border-bottom:1px solid var(--line-2); font-size:13px; }
 .rowd:last-child { border-bottom:0; }
-.rowd .who { font-size:12px; font-weight:600; color:var(--ink-2); }
+.rowd .who { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; font-weight:600; color:var(--ink-2); }
 .rowd .line2 { font-family:var(--mono); font-size:11px; color:var(--ink-3); grid-column:2 / 4; word-break:break-all; }
 .rowd .amt { font-weight:600; text-align:right; }
 .rowd .rsn { color:var(--refuse); font-weight:600; }
@@ -148,6 +152,27 @@ body { margin:0; background:var(--ground); color:var(--ink); font-family:var(--s
 
 @media (max-width:1180px) { .band,.cols { grid-template-columns:1fr; } }
 @media (prefers-reduced-motion:reduce) { * { transition:none !important; animation:none !important; } }
+
+/* compact: the page is recorded as a screen capture at 1440x900 and must not scroll */
+.headline .big { font-size:30px; }
+.headline .detail { font-size:13px; margin-top:6px; }
+.headline .proof { margin-top:6px; }
+.band { margin-bottom:var(--gap); }
+.band > section,.panel { padding:12px 14px; }
+.ph { margin-bottom:8px; }
+.acard { padding:9px 12px; margin-bottom:8px; gap:4px; }
+.acard .understood { font-size:13.5px; }
+.acard .txnote { font-size:11.5px; padding:5px 8px; }
+.rowd { grid-template-columns:62px 1fr auto; padding:5px 0; gap:1px 10px; font-size:12.5px; }
+.rowd .line2 { font-size:10.5px; }
+.rowd .line2 a { color:inherit; }
+.rowd .nolink { color:var(--ink-3); }
+.strangers { margin-top:10px; padding-top:8px; }
+.foot { font-size:11px; margin-top:8px; line-height:1.4; }
+.more { font-size:11px; color:var(--ink-3); padding:4px 0 0; }
+.kv { font-size:12.5px; padding:1px 0; }
+.codes td { padding:2px 0; font-size:11.5px; }
+.note { margin:6px 0 0; }
 </style>
 
 <div class="stage">
@@ -161,10 +186,11 @@ body { margin:0; background:var(--ground); color:var(--ink); font-family:var(--s
         <span><b id="clock">—</b></span>
         <span id="paused"></span>
       </div>
+      <div class="beat"><span>chain read <b id="readAge">—</b></span></div>
     </section>
 
     <section class="headline unknown" id="headline">
-      <div class="ph"><h2>The account that holds the money</h2><span class="src">read from RPC, not from the contract</span></div>
+      <div class="ph"><h2>The account that holds the money</h2><span class="src">RPC view_access_key_list</span></div>
       <div class="big" id="hlBig">reading the wallet's keys…</div>
       <div class="detail" id="hlDetail"></div>
       <div id="hlKeys"></div>
@@ -172,7 +198,7 @@ body { margin:0; background:var(--ground); color:var(--ink); font-family:var(--s
     </section>
 
     <section class="gauge">
-      <div class="ph"><h2>One budget, two agents</h2><span class="src">the two accounts share a parent, so they share a rule</span></div>
+      <div class="ph"><h2>One budget, two agents</h2><span class="src">same parent account, same rule</span></div>
       <div class="big">
         <b id="budgetSpent">—</b>
         <span class="of">of <b id="budgetLimit">—</b> USDC this period</span>
@@ -195,7 +221,6 @@ body { margin:0; background:var(--ground); color:var(--ink); font-family:var(--s
           <button id="askGo" type="submit">Ask</button>
         </form>
         <div id="askMsg" class="askMsg"></div>
-        <p class="note">The card shows what the agent <b>understood</b> before it sent, and keeps it after the chain answers. A misreading is visible, not silent.</p>
       </section>
     </div>
 
@@ -208,11 +233,9 @@ body { margin:0; background:var(--ground); color:var(--ink); font-family:var(--s
         <div class="strangers">
           <div class="ringhead"><h3>Strangers</h3><span class="src" id="strangersCount"></span></div>
           <div id="strangers"><div class="empty">no stranger has called spend</div></div>
-          <div class="foot">Anyone can call <code>spend</code>. A caller with no rule is refused and kept in its own small ring, so a flood from a stranger can only push out other strangers, never the agents' evidence. A refusal here is part of the story.</div>
         </div>
         <div class="foot">
-          <b>Every refusal is a successful transaction.</b> The contract returns the refusal instead of reverting, so the explorer shows a green tick next to a payment that did not happen. That is the design: a revert would roll the record back and leave no reason on-chain. The sentences on this page come from the contract, not from this page. Rows from the log carry no transaction hash; the card on the left links the one the agent just sent.
-          <a id="walletLink" target="_blank" rel="noopener" style="color:inherit">All wallet transactions</a>
+          <b>Every refusal is a successful transaction.</b> The contract returns the refusal instead of reverting, so the explorer shows a green tick beside a payment that did not happen. A revert would roll the record back and leave no reason on-chain. Reasons are the contract's own words. Anyone can call <code>spend</code>; strangers get their own small ring so they cannot push out the agents' evidence.
         </div>
       </section>
     </div>
@@ -223,12 +246,11 @@ body { margin:0; background:var(--ground); color:var(--ink); font-family:var(--s
         <div id="rule"></div>
       </section>
       <section class="panel">
-        <div class="ph"><h2>Where the agents' keys live</h2><span class="src">view_access_key_list on each agent</span></div>
+        <div class="ph"><h2>The agents' keys</h2><span class="src" id="keysAge">—</span></div>
         <div id="agentKeys"></div>
-        <p class="note">Each agent holds one key that can call <b>spend</b> and nothing else, on its own account.</p>
       </section>
       <section class="panel">
-        <div class="ph"><h2>Why a payment is refused</h2><span class="src">refusal_codes(), from the contract</span></div>
+        <div class="ph"><h2>Why a payment is refused</h2><span class="src">refusal_codes()</span></div>
         <table class="codes" id="codes"></table>
       </section>
     </div>
@@ -236,17 +258,21 @@ body { margin:0; background:var(--ground); color:var(--ink); font-family:var(--s
 </div>
 
 <script type="module">
-  import { callView, accessKeys, DEFAULT_RPC } from "./near.mjs";
+  import { accessKeys, DEFAULT_RPC } from "./near.mjs";
   import {
     shortId, formatUsdc, renderAction, renderDecisions, renderBudget, renderWalletKeys,
-    renderAgentKeys, accountUrl,
+    renderAgentKeys, renderAge,
   } from "./demo-render.mjs";
 
   const $ = (id) => document.getElementById(id);
   const q = new URLSearchParams(location.search);
+  // ?rpc= overrides the endpoint for the page's own key-list reads. A backstop, not the plan:
+  // the page makes almost no RPC calls (see the budget in agent/chain.mjs).
   const RPC = q.get("rpc") || DEFAULT_RPC;
   const PORTS = (q.get("ports") || "8788,8789").split(",").map(Number);
   const POLL_MS = 2000;
+  const KEYS_EVERY_MS = 30_000;
+  const SHOW_AGENTS = 6, SHOW_STRANGERS = 3;
 
   // Text only, never innerHTML: names and reasons arrive from the network.
   function h(tag, cls, text, ...kids) {
@@ -256,6 +282,7 @@ body { margin:0; background:var(--ground); color:var(--ink); font-family:var(--s
     for (const k of kids) if (k) e.append(k);
     return e;
   }
+  const link = (href, text) => { const a = h("a", null, text); a.href = href; a.target = "_blank"; a.rel = "noopener"; return a; };
 
   let dep = null;
   try { dep = await (await fetch("../deployments/testnet.json")).json(); } catch { /* ?wallet= may cover it */ }
@@ -266,16 +293,29 @@ body { margin:0; background:var(--ground); color:var(--ink); font-family:var(--s
     throw new Error("no wallet");
   }
   $("whoWallet").textContent = WALLET;
-  $("walletLink").href = accountUrl(WALLET);
 
-  const view = (m, a) => callView(RPC, WALLET, m, a);
   let n = 0;
-  const lastGood = { reasons: null, keys: null };
   const known = PORTS.map(() => null);
   let inFlight = false;
+  // Key lists. The agents read them (30 s cache, see agent/chain.mjs) and /state carries them with
+  // the time they were read. The page reads them itself, through ?rpc=, only when no agent can
+  // supply the wallet's list. Either way the screen says when it was last confirmed.
+  const keys = { wallet: null, agents: {}, confirmedAt: null, failedAt: null, lastErr: null, running: false };
+  let lastChain = null;
+
+  async function refreshKeys(addrs) {
+    if (keys.running) return;
+    keys.running = true;
+    try {
+      const [w, ...a] = await Promise.all([accessKeys(RPC, WALLET), ...addrs.map((x) => accessKeys(RPC, x))]);
+      keys.wallet = w; addrs.forEach((x, i) => (keys.agents[x] = a[i]));
+      keys.confirmedAt = Date.now(); keys.failedAt = null; keys.lastErr = null;
+    } catch (e) { keys.failedAt = Date.now(); keys.lastErr = String(e.message ?? e); }
+    finally { keys.running = false; }
+  }
 
   async function agentState(port) {
-    const res = await fetch(`http://localhost:${port}/state`, { cache: "no-store", signal: AbortSignal.timeout(POLL_MS) });
+    const res = await fetch(`http://localhost:${port}/state`, { cache: "no-store", signal: AbortSignal.timeout(4000) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json();
   }
@@ -283,95 +323,86 @@ body { margin:0; background:var(--ground); color:var(--ink); font-family:var(--s
   async function poll() {
     if (inFlight) return;
     inFlight = true;
-    const problems = [];
     try {
       const states = await Promise.all(PORTS.map((p) => agentState(p).catch((e) => ({ __down: e.message }))));
       states.forEach((s, i) => { if (!s.__down && s.agentAddr) known[i] = { name: s.name, addr: s.agentAddr }; });
-      const node = states.find((s) => !s.__down)?.cohort?.node || dep?.budget_node || null;
-      const agentAddrs = known.map((k) => k?.addr).filter(Boolean);
-      const once = async (label, p) => { try { return await p; } catch (e) { problems.push(`${label}: ${e.message}`); return undefined; } };
+      const up = states.filter((s) => !s.__down);
+      const addrs = known.map((k) => k?.addr).filter(Boolean);
+      const now = Date.now();
+      // From the agents: the wallet's list (freshest of the two), and each agent's own.
+      const fromAgents = up.map((s) => s.chain?.keys?.wallet).filter((k) => k?.list).sort((a, b) => b.at - a.at)[0];
+      if (fromAgents) {
+        keys.wallet = fromAgents.list; keys.confirmedAt = fromAgents.at; keys.failedAt = null;
+        for (const s of up) { const k = s.chain?.keys?.self; if (k?.list) keys.agents[k.account] = k.list; }
+      } else if (!keys.running && (!keys.confirmedAt || now - (keys.failedAt ?? keys.confirmedAt) >= KEYS_EVERY_MS)) {
+        refreshKeys(addrs);
+      }
 
-      // Public RPCs do rate-limit (the near.org one answered 429 while this was written), so the
-      // page spends as few calls as it can: three per poll, plus the key lists every fifth poll
-      // and the refusal table until it has been read once. node_record is one contract view
-      // carrying the rule, the window start and what is spent in it.
-      const keysDue = n % 5 === 0 || !lastGood.keys;
-      const [log, reasons, paused, rec, wkeys, ...akeys] = await Promise.all([
-        once("decision_log", view("decision_log")),
-        lastGood.reasons ? null : once("refusal_codes", view("refusal_codes")),
-        once("is_paused", view("is_paused")),
-        node ? once("node_record", view("node_record", { node })) : null,
-        keysDue ? once("wallet keys", accessKeys(RPC, WALLET)) : lastGood.keys.wallet,
-        ...agentAddrs.map((a, i) => (keysDue ? once(`${a} keys`, accessKeys(RPC, a)) : lastGood.keys.agents[i])),
-      ]);
-      if (keysDue && wkeys) lastGood.keys = { wallet: wkeys, agents: akeys };
-      const rule = rec?.rule ?? null, spent = rec?.spent ?? null, began = rec?.window_began_ms ?? null;
-      if (reasons) lastGood.reasons = reasons;
-      const reasonTable = lastGood.reasons;
+      // One reader per agent, same chain: take the freshest answer.
+      const withChain = up.filter((s) => s.chain?.log);
+      withChain.sort((a, b) => (b.chain.readAt?.decision_log ?? 0) - (a.chain.readAt?.decision_log ?? 0));
+      const c = withChain[0]?.chain ?? null;
+      if (c) lastChain = c;
+      const ch = c ?? lastChain; // if every agent is down, show the last thing read, marked
 
-      $("link").classList.toggle("off", problems.length > 0 || states.some((s) => s.__down));
+      const txs = Object.assign({}, ...up.map((s) => s.txs ?? {}));
+      const reasons = ch?.reasons ?? null;
+
+      $("link").classList.toggle("off", up.length < PORTS.length || !c);
       $("tick").textContent = ++n;
       $("clock").textContent = new Date().toTimeString().slice(0, 8);
-      $("paused").textContent = paused === true ? "PAUSED" : "";
+      $("paused").textContent = ch?.paused === true ? "PAUSED" : "";
+      $("readAge").textContent = ch ? renderAge(ch.readAt?.decision_log, now) : "—";
 
-      paintHeadline(wkeys ? renderWalletKeys(wkeys, WALLET) : renderWalletKeys(null, WALLET));
-      paintAgents(states, reasonTable);
+      paintHeadline(renderWalletKeys(keys.wallet, WALLET), now);
+      paintAgents(states, reasons);
       paintAskSelect();
-      if (log) paintLog(renderDecisions(log, reasonTable));
-      // undefined means the read failed: keep what is on screen (the banner says so) rather than
-      // painting "no rule". null means the chain answered that there is none.
-      if (rec !== undefined) {
-        paintBudget(renderBudget({ rule, spent, windowBeganMs: began, log }), rule);
-        paintRule(rule, node);
+      if (ch) {
+        paintLog(renderDecisions(ch.log, reasons, now, txs));
+        paintBudget(renderBudget({ rule: ch.rule, spent: ch.spent, windowBeganMs: ch.windowBeganMs, log: ch.log }));
+        paintRule(ch.rule, ch.node);
+        paintCodes(reasons);
       }
-      if (!akeys.includes(undefined)) paintAgentKeys(agentAddrs, akeys);
-      paintCodes(reasonTable);
+      paintAgentKeys(addrs, now);
 
-      const down = states.map((s, i) => (s.__down ? `${known[i]?.name ?? "agent on :" + PORTS[i]} (${s.__down})` : null)).filter(Boolean);
+      const msgs = [];
+      states.forEach((s, i) => { if (s.__down) msgs.push(`agent ${known[i]?.name ?? ":" + PORTS[i]} not answering (${s.__down})`); });
+      if (!c) msgs.push("no agent has chain data to give");
+      for (const s of up) for (const e of s.chain?.errors ?? []) msgs.push(`${s.name}: ${e.view} failing (${e.error.slice(0, 80)})`);
+      if (keys.lastErr) msgs.push(`key lists: ${keys.lastErr.slice(0, 80)}`);
       const stale = $("stale");
-      const msgs = [...problems, ...down.map((d) => `agent not answering: ${d}`)];
       stale.hidden = msgs.length === 0;
-      if (msgs.length) {
-        stale.replaceChildren(h("strong", null, "some reads failed. "), document.createTextNode(msgs.join(" · ") + ". What is shown for those is the last thing read, not the present."));
-      }
+      if (msgs.length) stale.replaceChildren(h("strong", null, "some reads failed. "), document.createTextNode(msgs.join(" · ") + ". Where a read failed, the last good value is shown, not the present."));
     } finally { inFlight = false; }
   }
 
-  function paintHeadline(w) {
+  function paintHeadline(w, now) {
     $("headline").className = `headline ${w.tone}`;
     $("hlBig").textContent = w.headline;
     $("hlDetail").textContent = w.detail;
     $("hlKeys").replaceChildren(...w.keys.map((k) => h("div", "keyrow bad", `${k.key} · ${k.kind}`)));
-    $("hlProof").textContent = w.known ? `view_access_key_list(${WALLET}) → ${w.count} key${w.count === 1 ? "" : "s"}` : "";
+    const age = keys.confirmedAt ? `confirmed ${renderAge(keys.confirmedAt, now)}${keys.failedAt ? " · latest check failed" : ""}` : "not confirmed yet";
+    $("hlProof").textContent = w.known ? `view_access_key_list → ${w.count} key${w.count === 1 ? "" : "s"} · ${age}` : age;
   }
 
   function paintAgents(states, reasons) {
-    const el = $("agents");
     const cards = states.map((s, i) => {
       const id = s.__down ? known[i] : { name: s.name, addr: s.agentAddr };
       const a = s.__down ? null : renderAction(s.lastAction, reasons);
       const card = h("div", `acard${s.__down ? " down" : ""}${a ? " t-" + a.tone : ""}`);
-      card.append(h("div", "head", null, h("span", "nm", id?.name ?? `agent on :${PORTS[i]}`), h("span", "ad", shortId(id?.addr)),
+      card.append(h("div", "head", null, h("span", "nm", id?.name ?? `agent on :${PORTS[i]}`), h("span", "ad", id?.addr ? shortId(id.addr.split(".").slice(1).join(".")) : ""),
         h("span", "status", s.__down ? "OFFLINE" : a ? a.label : "idle")));
       if (s.__down) { card.append(h("div", "why", `not answering: ${s.__down}. The chain is unaffected.`)); return card; }
       if (!a) { card.append(h("div", "why", "nothing proposed yet")); return card; }
-      const u = h("div", "understood", a.understood, h("small", null, "what the agent understood"));
-      u.prepend(u.lastChild);
+      const u = h("div", "understood", null, h("small", null, "what the agent understood"), document.createTextNode(a.understood));
       card.append(u);
-      if (a.reason) {
-        card.append(h("div", "reason", a.reason, a.code != null ? h("small", null, `code ${a.code}`) : null));
-      }
-      card.append(h("div", "why", a.note));
-      if (a.txUrl) {
-        const link = h("a", null, a.txShort);
-        link.href = a.txUrl; link.target = "_blank"; link.rel = "noopener"; link.style.color = "inherit";
-        card.append(h("div", "tx", "tx ", link));
-      }
+      if (a.reason) card.append(h("div", "reason", a.reason, a.code != null ? h("small", null, `code ${a.code}`) : null));
+      card.append(h("div", "why", a.note + (a.settledBy === "return-value" ? " (from spend's return value; the log had not caught up)" : "")));
+      if (a.txUrl) card.append(h("div", "tx", "tx ", link(a.txUrl, a.txShort)));
       if (a.txNote) card.append(h("div", "txnote", a.txNote));
-      if (a.settledBy === "return-value") card.append(h("div", "why", "settled from spend's return value; the log had not caught up when last read"));
       return card;
     });
-    el.replaceChildren(...cards);
+    $("agents").replaceChildren(...cards);
   }
 
   function paintAskSelect() {
@@ -385,24 +416,29 @@ body { margin:0; background:var(--ground); color:var(--ink); font-family:var(--s
   }
 
   function logRow(r) {
-    const who = h("div", "who", r.agent.split(".")[0]);
     const mid = h("div", null, null);
     if (r.status === "refused") mid.append(h("span", "rsn", r.reason ?? "refused"), h("span", "st", `  code ${r.code}`));
     else mid.append(h("span", "st", r.status.toUpperCase()));
-    const right = h("div", "amt num", `${r.amount} USDC`);
-    const l2 = h("div", "line2", `${r.agent} → ${r.payee} · budget `);
-    l2.append(h("span", r.node == null ? "nonode" : null, r.node == null ? r.nodeLabel : r.node), document.createTextNode(` · ${r.ago}`));
-    return h("div", `rowd ${r.status}`, null, who, mid, right, l2);
+    // node: printed only when it is not the one budget this page is about, or is null.
+    const l2 = h("div", "line2", `${shortId(r.payee)} · ${r.ago}`);
+    if (r.node == null) l2.append(document.createTextNode(" · "), h("span", "nonode", r.nodeLabel));
+    else if (r.ring === "strangers") l2.append(document.createTextNode(` · budget ${r.node}`));
+    l2.append(document.createTextNode(" · "));
+    l2.append(r.txUrl ? link(r.txUrl, "view transaction") : h("span", "nolink", r.ring === "strangers" ? "no link (stranger)" : "no link"));
+    if (!r.txUrl) l2.title = r.noLink;
+    return h("div", `rowd ${r.status}`, null, h("div", "who", r.agent.split(".")[0]), mid, h("div", "amt num", `${r.amount}`), l2);
   }
 
   function paintLog(r) {
-    $("decisions").replaceChildren(...(r.agents.length ? r.agents.map(logRow) : [h("div", "empty", "nothing yet")]));
-    $("strangers").replaceChildren(...(r.strangers.length ? r.strangers.map(logRow) : [h("div", "empty", "no stranger has called spend")]));
-    $("agentsCount").textContent = `${r.agentCount} ever${r.agentsDropped ? `, last ${r.agents.length} shown` : ""}`;
-    $("strangersCount").textContent = `${r.strangerCount} ever${r.strangersDropped ? `, last ${r.strangers.length} shown` : ""}`;
+    const more = (n) => (n > 0 ? h("div", "more", `+${n} older in the log`) : null);
+    const a = r.agents.slice(0, SHOW_AGENTS), st = r.strangers.slice(0, SHOW_STRANGERS);
+    $("decisions").replaceChildren(...(a.length ? a.map(logRow) : [h("div", "empty", "nothing yet")]), more(r.agents.length - a.length) ?? "");
+    $("strangers").replaceChildren(...(st.length ? st.map(logRow) : [h("div", "empty", "no stranger has called spend")]), more(r.strangers.length - st.length) ?? "");
+    $("agentsCount").textContent = `${r.agentCount} ever`;
+    $("strangersCount").textContent = `${r.strangerCount} ever`;
   }
 
-  function paintBudget(b, rule) {
+  function paintBudget(b) {
     $("budgetSpent").textContent = b.spent;
     $("budgetLimit").textContent = b.limit;
     $("budgetPct").textContent = b.hasRule ? `${b.pct}%` : "—";
@@ -413,7 +449,7 @@ body { margin:0; background:var(--ground); color:var(--ink); font-family:var(--s
       return h("div", "split-row", null, sw, h("span", null, s.agent ? s.agent.split(".")[0] : s.label), s.agent ? h("span", "ad", s.agent) : null, h("span", "am num", `${s.amount}`));
     }));
     $("budgetNote").textContent = !b.hasRule ? "this node has no rule" : b.segments.length === 0 ? "nothing spent in this window" :
-      "One rule, one ledger. Neither agent knows the other exists; the contract reads the shared parent off their account ids." + (b.overAttributed ? " The log and the total were read a moment apart and disagree slightly." : "");
+      "One ledger. Neither agent knows the other exists." + (b.overAttributed ? " The log and the total were read a moment apart and disagree slightly." : "");
   }
 
   function paintRule(rule, node) {
@@ -422,20 +458,19 @@ body { margin:0; background:var(--ground); color:var(--ink); font-family:var(--s
     const kv = (k, v) => h("div", "kv", k, h("b", null, v));
     $("rule").replaceChildren(
       kv("per payment", `${formatUsdc(rule.per_tx_limit)} USDC`),
-      kv("per period", `${formatUsdc(rule.period_limit)} USDC`),
-      kv("period", `${Math.round(rule.period_ms / 3600000)} h`),
-      kv("token", shortId(rule.token)),
+      kv("per period", `${formatUsdc(rule.period_limit)} USDC / ${Math.round(rule.period_ms / 3600000)} h`),
       kv("paused", rule.paused ? "yes" : "no"),
       kv("allowed payees", ""),
       ...(rule.payees ?? []).map((p) => h("div", "keyrow", p)),
     );
   }
 
-  function paintAgentKeys(addrs, lists) {
-    $("agentKeys").replaceChildren(...addrs.map((a, i) => {
-      const k = renderAgentKeys(lists[i], a, WALLET);
-      const box = h("div", null, null, h("div", "kv", a.split(".")[0], h("b", null, k.known ? `${k.count} key${k.count === 1 ? "" : "s"}` : "unreadable")));
-      for (const key of k.keys) box.append(h("div", key.restricted ? "keyrow" : "keyrow bad", `${key.key} · ${key.kind}`));
+  function paintAgentKeys(addrs, now) {
+    $("keysAge").textContent = keys.confirmedAt ? `confirmed ${renderAge(keys.confirmedAt, now)}` : "reading…";
+    $("agentKeys").replaceChildren(...addrs.map((a) => {
+      const k = renderAgentKeys(keys.agents[a], a, WALLET);
+      const box = h("div", null, null, h("div", "kv", a.split(".")[0], h("b", null, k.known ? `${k.count} key${k.count === 1 ? "" : "s"}` : "reading…")));
+      for (const key of k.keys) box.append(h("div", key.restricted ? "keyrow" : "keyrow bad", `${key.key.slice(0, 18)}… · ${key.kind}`));
       return box;
     }));
   }

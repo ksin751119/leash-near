@@ -106,8 +106,9 @@ export function renderAction(a, reasons) {
 
 const NO_NODE = "no budget node (this account id has no “.”)";
 
-function renderRow(d, ring, reasons, nowSec) {
+function renderRow(d, ring, reasons, nowSec, txs) {
   const o = d.outcome ?? {};
+  const tx = txs?.[`${d.agent}|${d.timestamp_ms}`] ?? null;
   return {
     ring,
     agent: d.agent,
@@ -122,13 +123,26 @@ function renderRow(d, ring, reasons, nowSec) {
     reason: o.status === "refused" ? (o.reason ?? sentenceFor(o.code, reasons)) : null,
     ago: relativeTime(Math.floor((d.timestamp_ms ?? 0) / 1000), nowSec),
     timestampMs: d.timestamp_ms ?? 0,
+    // The contract cannot record its own transaction hash, so the chain has none to give. The
+    // agent that sent a payment kept the hash; rows nobody here sent have no link, and say so.
+    txUrl: tx ? txUrl(tx) : null,
+    noLink: tx ? null : ring === "strangers"
+      ? "no transaction link: a stranger's call, not sent by these agents"
+      : "no transaction link: not sent by a running agent (older, or from another process)",
   };
 }
 
-export function renderDecisions(log, reasons, nowMs = Date.now()) {
+export function renderAge(atMs, nowMs) {
+  if (!atMs) return "not read yet";
+  const s = Math.max(0, Math.round((nowMs - atMs) / 1000));
+  if (s < 2) return "just now";
+  return s < 90 ? `${s}s ago` : `${Math.round(s / 60)}m ago`;
+}
+
+export function renderDecisions(log, reasons, nowMs = Date.now(), txs = {}) {
   const nowSec = Math.floor(nowMs / 1000);
-  const agents = (log?.decisions ?? []).map((d) => renderRow(d, "agents", reasons, nowSec));
-  const strangers = (log?.strangers ?? []).map((d) => renderRow(d, "strangers", reasons, nowSec));
+  const agents = (log?.decisions ?? []).map((d) => renderRow(d, "agents", reasons, nowSec, txs));
+  const strangers = (log?.strangers ?? []).map((d) => renderRow(d, "strangers", reasons, nowSec, txs));
   const count = Number(log?.decision_count ?? 0);
   const scount = Number(log?.stranger_count ?? 0);
   return {

@@ -24,17 +24,17 @@ function stubFetch(answers) {
   return calls;
 }
 
+const rec = (o = {}) => ({ rule: RULE, epoch: 0, version: 1, window_began_ms: 1_000, spent: "7000000", ...o });
 const answers = (over = {}) => ({
   node_for: NODE,
-  rule_of: RULE,
-  spent_in_period: "7000000",
+  node_record: rec(),
   is_paused: false,
   refusal_codes: REASONS,
   ...over,
 });
 
 test("readView carries every field decide() reads, from the right view call", async () => {
-  const calls = stubFetch(answers({ is_paused: true, spent_in_period: "1234567" }));
+  const calls = stubFetch(answers({ is_paused: true, node_record: rec({ spent: "1234567" }) }));
   const v = await readView({ wallet: WALLET, agent: ALPHA, units: UNITS });
   assert.equal(v.accountPaused, true);
   assert.equal(v.spent, "1234567");
@@ -47,26 +47,26 @@ test("readView carries every field decide() reads, from the right view call", as
   assert.ok(asked("is_paused"), "is_paused was never called");
   assert.equal(asked("is_paused").account, WALLET);
   assert.deepEqual(asked("node_for").args, { agent: ALPHA });
-  assert.deepEqual(asked("rule_of").args, { node: NODE });
-  assert.deepEqual(asked("spent_in_period").args, { node: NODE });
+  assert.deepEqual(asked("node_record").args, { node: NODE });
+  assert.equal(v.windowBeganMs, 1_000);
 });
 
 test("the account pause reaches the prediction end to end: chain says paused, decide says code 2", async () => {
-  stubFetch(answers({ is_paused: true, spent_in_period: "0" }));
+  stubFetch(answers({ is_paused: true, node_record: rec({ spent: "0" }) }));
   const v = await readView({ wallet: WALLET, agent: ALPHA, units: UNITS });
   const d = decide(v, { token: TOKEN, payee: PAY1, amount: 100_000n });
   assert.equal(d.code, 2);
-  stubFetch(answers({ is_paused: false, spent_in_period: "0" }));
+  stubFetch(answers({ is_paused: false, node_record: rec({ spent: "0" }) }));
   const ok = decide(await readView({ wallet: WALLET, agent: ALPHA, units: UNITS }), { token: TOKEN, payee: PAY1, amount: 100_000n });
   assert.equal(ok.verdict, "will-pass");
 });
 
 test("the spent and rule views reach the prediction too", async () => {
-  stubFetch(answers({ spent_in_period: "9000000" }));
+  stubFetch(answers({ node_record: rec({ spent: "9000000" }) }));
   const d = decide(await readView({ wallet: WALLET, agent: ALPHA, units: UNITS }), { token: TOKEN, payee: PAY1, amount: 2_000_000n });
   assert.equal(d.code, 6);
   assert.match(d.explain, /1\.00 left of 10\.00 USDC/);
-  stubFetch(answers({ rule_of: { ...RULE, payees: [] } }));
+  stubFetch(answers({ node_record: rec({ rule: { ...RULE, payees: [] } }) }));
   const e = decide(await readView({ wallet: WALLET, agent: ALPHA, units: UNITS }), { token: TOKEN, payee: PAY1, amount: 1n });
   assert.equal(e.code, 4);
 });
@@ -77,7 +77,7 @@ test("an agent with no node reads no rule and spends nothing, and decide() says 
   assert.equal(v.node, null);
   assert.equal(v.rule, null);
   assert.equal(v.spent, "0");
-  assert.ok(!calls.some((c) => c.method === "rule_of"));
+  assert.ok(!calls.some((c) => c.method === "node_record"));
   assert.equal(decide(v, { token: TOKEN, payee: PAY1, amount: 1n }).code, 1);
 });
 
