@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { settle, sendAndRecord, publicState, keyFileWarning } from "./loop.mjs";
+import { settle, sendAndRecord, publicState, keyFileWarning, resolveUnconfirmed } from "./loop.mjs";
 import { entry, log, view, ALPHA, BETA, PAY1, TOKEN, NODE, UNITS } from "./fixtures.mjs";
 
 const inFlight = (over = {}) => ({
@@ -97,7 +97,7 @@ test("send returned a refusal but the log is unreadable: the return value settle
   await sendAndRecord(state, attempt, { send, readLog: unreadable });
   assert.equal(state.lastAction.status, "refused");
   assert.equal(state.lastAction.code, 5);
-  assert.equal(state.lastAction.settledBy, "return-value");
+  assert.equal(state.lastAction.settledBy, "transaction");
 });
 
 test("send returned nothing usable and the log is unreadable: unknown, never in-flight", async () => {
@@ -107,19 +107,54 @@ test("send returned nothing usable and the log is unreadable: unknown, never in-
   assert.equal(state.lastAction.tx, "TX");
 });
 
-test("an unknown or error action is settled later when the chain shows the refusal", () => {
-  for (const status of ["unknown", "error"]) {
-    const a = settle(inFlight({ status, reason: "timed out" }), log({ decisions: [entry()], decision_count: 4 }));
-    assert.equal(a.status, "refused", status);
-    assert.equal(a.code, 6);
-    assert.equal(a.reason, "over the limit for this period");
+// A network failure must never turn into a policy refusal on screen. The chain log can hold an
+// identical refusal (a retried instruction, a minute apart) that has nothing to do with this
+// attempt, so only an in-flight action is ever matched to the log, and only by the count taken just
+// before the send. Reverting PROVISIONAL to include "error"/"unknown", or restoring the timestamp
+// fallback, makes these fail.
+test("a named ending is final: an identical refusal in the log does not turn it into REFUSED", () => {
+  const sameRefusal = log({ decisions: [entry({ timestamp_ms: Date.now() - 30_000 })], decision_count: 4 });
+  for (const errorKind of ["not-sent", "rejected", "chain-failed"]) {
+    const a = inFlight({ status: "error", errorKind, reason: "x", at: Date.now() });
+    assert.equal(settle(a, sameRefusal).status, "error", errorKind);
   }
+  // same with the counts unknown, which used to fall back to a 60 s timestamp window
+  const unknownCounts = inFlight({ status: "error", errorKind: "not-sent", countBefore: null, strangersBefore: null, at: Date.now() });
+  assert.equal(settle(unknownCounts, sameRefusal).status, "error");
 });
 
-test("/state settles an action that ended as error, once the chain has recorded it", () => {
-  const state = { name: "payments", agentAddr: ALPHA, lastAction: inFlight({ status: "error", reason: "near-cli timed out" }) };
+test("an unconfirmed send is not settled from the log; only its own hash resolves it", () => {
+  const a = inFlight({ status: "unknown", errorKind: "unconfirmed", tx: "TXU" });
+  assert.equal(settle(a, log({ decisions: [entry()], decision_count: 4 })).status, "unknown");
+});
+
+test("/state never turns an error into a refusal, even when the chain has an identical record", () => {
+  const state = { name: "payments", agentAddr: ALPHA, lastAction: inFlight({ status: "error", errorKind: "not-sent", reason: "could not reach the chain" }) };
   const s = publicState(state, log({ decisions: [entry()], decision_count: 4 }), view());
-  assert.equal(s.lastAction.status, "refused");
+  assert.equal(s.lastAction.status, "error");
+  assert.equal(s.lastAction.errorKind, "not-sent");
+});
+
+test("an unconfirmed send is resolved by looking up its hash, and only while it is still on screen", async () => {
+  const state = { lastAction: inFlight({ status: "unknown", errorKind: "unconfirmed", tx: "TXU" }) };
+  const refusedResult = { status: { SuccessValue: Buffer.from('{"status":"refused","code":5,"reason":"over the per-transaction limit"}').toString("base64") } };
+  const replies = [{ state: "unreachable" }, { state: "unknown" }, { state: "found", result: refusedResult }];
+  let i = 0;
+  const done = await resolveUnconfirmed(state, "TXU", { lookup: async () => replies[i++], waitMs: 0, sleep: async () => {} });
+  assert.equal(done, true);
+  assert.equal(state.lastAction.status, "refused");
+  assert.equal(state.lastAction.settledBy, "transaction-lookup");
+  // a newer instruction replaced the card: the resolver leaves it alone
+  const state2 = { lastAction: inFlight({ status: "in-flight", tx: "OTHER" }) };
+  assert.equal(await resolveUnconfirmed(state2, "TXU", { lookup: async () => ({ state: "found", result: refusedResult }), sleep: async () => {} }), false);
+  assert.equal(state2.lastAction.status, "in-flight");
+});
+
+test("a chain failure found by lookup is named as one, not as a refusal", async () => {
+  const state = { lastAction: inFlight({ status: "unknown", errorKind: "unconfirmed", tx: "TXU" }) };
+  await resolveUnconfirmed(state, "TXU", { lookup: async () => ({ state: "found", result: { status: { Failure: { ActionError: {} } } } }), sleep: async () => {} });
+  assert.equal(state.lastAction.status, "error");
+  assert.equal(state.lastAction.errorKind, "chain-failed");
 });
 
 test("a final status is never rewritten by a later, different record", () => {
@@ -127,7 +162,7 @@ test("a final status is never rewritten by a later, different record", () => {
   assert.equal(settle(done, log({ decisions: [entry()], decision_count: 9 })), done);
 });
 
-test("when the pre-send read failed, countBefore is null (not Infinity) and the timestamp settles it", async () => {
+test("when the pre-send read failed, countBefore is null (not Infinity) and nothing is matched by timestamp", async () => {
   const state = { lastAction: null };
   let reads = 0;
   const readLog = async () => {
@@ -138,11 +173,10 @@ test("when the pre-send read failed, countBefore is null (not Infinity) and the 
   assert.equal(state.lastAction.countBefore, null);
   assert.equal(state.lastAction.countKnown, false);
   assert.equal(JSON.parse(JSON.stringify(state.lastAction)).countBefore, null);
-  assert.equal(state.lastAction.status, "refused");
-  // An old record for the same attempt must not settle it.
-  const old = settle({ ...inFlight(), countBefore: null, strangersBefore: null, at: Date.now() },
-    log({ decisions: [entry({ timestamp_ms: Date.now() - 3_600_000 })], decision_count: 40 }));
-  assert.equal(old.status, "in-flight");
+  assert.equal(state.lastAction.status, "unknown"); // not "refused": a fresh identical record proves nothing
+  const stamp = settle({ ...inFlight(), countBefore: null, strangersBefore: null, at: Date.now() },
+    log({ decisions: [entry({ timestamp_ms: Date.now() })], decision_count: 40 }));
+  assert.equal(stamp.status, "in-flight");
 });
 
 // --- key file ---
@@ -238,7 +272,7 @@ test("a send that never reached the chain is an error named not-sent, with no tr
   assert.equal(state.sent, undefined);
 });
 
-test("a send we could not confirm stays provisional, keeps its hash, and is settled by the chain later", async () => {
+test("a send we could not confirm stays unknown, keeps its hash, and is not settled by the log", async () => {
   const state = { name: "p", agentAddr: ALPHA, lastAction: null };
   await sendAndRecord(state, pay, { send: async () => { throw new SendError("unconfirmed", "may still land", "TXU"); }, readLog: async () => log({ decision_count: 3 }) });
   assert.equal(state.lastAction.status, "unknown");
@@ -246,7 +280,18 @@ test("a send we could not confirm stays provisional, keeps its hash, and is sett
   assert.equal(state.lastAction.tx, "TXU");
   assert.equal(state.sent[0].tx, "TXU");
   const landed = log({ decisions: [entry({ amount: "5000000", timestamp_ms: 9 })], decision_count: 4 });
-  assert.equal(settle(state.lastAction, landed).status, "refused"); // the fixture entry is a refusal
+  assert.equal(settle(state.lastAction, landed).status, "unknown");
+});
+
+test("the hash is recorded as soon as it is signed, before the send returns", async () => {
+  const state = { name: "p", agentAddr: ALPHA, lastAction: null, sent: [] };
+  let savedWhileSending;
+  state.save = () => { savedWhileSending = state.sent.map((e) => e.tx); };
+  await sendAndRecord(state, pay, {
+    send: async (_i, hooks) => { hooks.onSigned("TXEARLY"); assert.deepEqual(savedWhileSending, ["TXEARLY"]); throw new Error("killed"); },
+    readLog: async () => log({ decision_count: 3 }),
+  });
+  assert.equal(state.sent.length, 1); // not duplicated when the send ends
 });
 
 test("the transaction links are still there after a restart", async () => {

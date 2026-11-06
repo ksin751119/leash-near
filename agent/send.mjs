@@ -100,7 +100,34 @@ export function outcomeOf(status) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-export async function sendSpend({ wallet, agent, keyFile, token, payee, amount, rpcOpts = {}, pollMs = 2000 }) {
+// Ask the chain about one exact transaction. "unknown" means an endpoint that answered does not know
+// it, which can simply mean that endpoint is behind: it never proves the transaction did not land.
+export async function lookupTx({ hash, agent, rpcOpts = {} }) {
+  try {
+    const r = await rpc("tx", { tx_hash: hash, sender_account_id: agent, wait_until: "FINAL" }, rpcOpts);
+    if (r.result) return { state: "found", result: r.result };
+    return { state: r.error?.cause?.name === "UNKNOWN_TRANSACTION" ? "unknown" : "unreachable" };
+  } catch { return { state: "unreachable" }; }
+}
+
+// A finished transaction as a lastAction patch: the contract's own outcome, or a chain failure.
+export function describeResult(result) {
+  const status = result?.status ?? {};
+  if (status.Failure) {
+    return { status: "error", errorKind: "chain-failed", reason: `the chain ran the transaction and it failed: ${JSON.stringify(status.Failure).slice(0, 220)}` };
+  }
+  const o = outcomeOf(status);
+  if (o) return { status: o.status, code: o.code ?? null, reason: o.reason ?? null, errorKind: null };
+  return { status: "unknown", errorKind: "unconfirmed", reason: "the transaction finished but its result could not be read" };
+}
+
+// An error from the broadcast that holds whatever any endpoint's view of the chain, as opposed to
+// one ("InvalidNonce": that nonce is used, maybe by this very transaction) that is evidence the
+// transaction landed. Only the first kind can support the word "rejected".
+const definitelyInvalid = (error) =>
+  error?.cause?.name === "INVALID_TRANSACTION" && !/InvalidNonce/.test(JSON.stringify(error.data ?? ""));
+
+export async function sendSpend({ wallet, agent, keyFile, token, payee, amount, rpcOpts = {}, pollMs = 2000, onSigned = () => {} }) {
   const { seed, publicKey, publicKeyString } = readKeyFile(keyFile);
 
   // 1. A nonce and a recent block hash. Nothing has been sent yet, so any failure here is certain.
@@ -123,45 +150,36 @@ export async function sendSpend({ wallet, agent, keyFile, token, payee, amount, 
     args: JSON.stringify({ token, payee, amount: String(amount) }), gas: 60_000_000_000_000n,
   });
   const { txHash, signedBase64 } = signTransaction(tx, seed);
+  onSigned(txHash); // the hash exists from here; the caller records it before anything is broadcast
 
-  // 2. Broadcast and wait for finality. The hash is known from here on, so whatever happens next
-  //    we can ask the chain about this exact transaction.
-  const lookup = async () => {
-    try {
-      const r = await rpc("tx", { tx_hash: txHash, sender_account_id: agent, wait_until: "FINAL" }, rpcOpts);
-      if (r.result) return { found: r.result };
-      const name = r.error?.cause?.name;
-      return { found: null, answered: true, unknown: name === "UNKNOWN_TRANSACTION" };
-    } catch { return { found: null, answered: false }; }
-  };
-
-  let result = null;
+  // 2. Broadcast. From this point no failure may be named from the broadcast alone: the same
+  //    signed transaction may have been included by an endpoint that then timed out, and a second
+  //    endpoint answers that with InvalidNonce. So an unclean broadcast is followed by looking
+  //    the hash up, and only the lookup, or a broadcast error that no endpoint's lag can explain,
+  //    decides what the screen says. When in doubt: SENT · NOT CONFIRMED, never a stronger claim.
+  let result = null, broadcastError = null;
   try {
     const r = await rpc("send_tx", { signed_tx_base64: signedBase64, wait_until: "FINAL" }, { ...rpcOpts, timeoutMs: 45_000 });
-    if (r.result) result = r.result;
-    else if (r.error?.cause?.name === "TIMEOUT_ERROR") result = null; // fall through to polling
-    else if (r.error) throw new SendError("rejected", `the chain refused the transaction before running it: ${JSON.stringify(r.error.data ?? r.error.cause?.name ?? r.error.message)}`.slice(0, 240), txHash);
+    if (r.result) result = r.result; else broadcastError = r.error ?? null;
   } catch (e) {
-    if (e instanceof SendError) throw e;
     if (!(e instanceof AllEndpointsFailed)) throw e;
   }
 
-  // 3. No answer to the broadcast: ask about the hash a few times before giving up.
-  let sawUnknown = false, answered = false;
   for (let i = 0; !result && i < 5; i++) {
-    const l = await lookup();
-    if (l.found) result = l.found;
-    else { answered ||= l.answered; sawUnknown ||= l.unknown; await sleep(pollMs); }
+    const l = await lookupTx({ hash: txHash, agent, rpcOpts });
+    if (l.state === "found") result = l.result;
+    else await sleep(pollMs);
   }
   if (!result) {
-    if (answered && sawUnknown) throw new SendError("not-sent", "no endpoint knows this transaction after the broadcast failed; it was not sent", txHash);
-    throw new SendError("unconfirmed", "sent, but the chain could not be reached to confirm what became of it; it may still land", txHash);
+    if (definitelyInvalid(broadcastError)) {
+      throw new SendError("rejected", `the network refused the transaction before running it: ${JSON.stringify(broadcastError.data ?? broadcastError.cause?.name).slice(0, 200)}`, txHash);
+    }
+    throw new SendError("unconfirmed", "sent, but the chain could not confirm what became of it; it may still land", txHash);
   }
 
-  // 4. Finished. A Failure here ran and rolled back; a SuccessValue may still be a refusal.
-  const status = result.status ?? {};
-  if (status.Failure) {
-    throw new SendError("chain-failed", `the chain ran the transaction and it failed: ${JSON.stringify(status.Failure).slice(0, 220)}`, txHash);
+  // 3. Finished. A Failure here ran and rolled back; a SuccessValue may still be a refusal.
+  if (result.status?.Failure) {
+    throw new SendError("chain-failed", `the chain ran the transaction and it failed: ${JSON.stringify(result.status.Failure).slice(0, 220)}`, txHash);
   }
-  return { txHash: result.transaction_outcome?.id ?? txHash, outcome: outcomeOf(status) };
+  return { txHash: result.transaction_outcome?.id ?? txHash, outcome: outcomeOf(result.status ?? {}) };
 }

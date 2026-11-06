@@ -90,11 +90,47 @@ test("the chain unreachable before sending is not-sent, with certainty", async (
   await rejects(sendSpend(args(keyFile())), "not-sent");
 });
 
-test("an endpoint refusing the transaction outright is rejected", async () => {
-  net({ ...prep, send_tx: () => err({ cause: { name: "INVALID_TRANSACTION" }, data: { InvalidTxError: "InvalidNonce" } }) });
-  const e = await rejects(sendSpend(args(keyFile())), "rejected");
-  assert.match(e.message, /InvalidNonce/);
+// "No money moved" is the sentence this product exists to make trustworthy, so a broadcast error
+// alone never earns it. These fail if sendSpend names an ending from the broadcast without
+// looking the hash up first.
+test("InvalidNonce from a second endpoint after a timeout on the first is not 'rejected': the lookup finds the landed payment", async () => {
+  const v = Buffer.from('{"status":"allowed"}').toString("base64");
+  process.env.NEAR_RPC = "http://a.test,http://b.test";
+  try {
+    const calls = [];
+    globalThis.fetch = async (url, init) => {
+      const m = JSON.parse(init.body);
+      const name = m.method === "query" ? m.params.request_type : m.method;
+      calls.push(`${url.slice(7, 8)}:${name}`);
+      if (name === "view_access_key") return ok({ nonce: 41 });
+      if (name === "block") return ok({ header: { hash: BLOCK } });
+      if (name === "send_tx" && url === "http://a.test") throw new Error("timeout"); // A included it, then hung
+      if (name === "send_tx") return err({ cause: { name: "INVALID_TRANSACTION" }, data: { InvalidTxError: { InvalidNonce: {} } } });
+      if (name === "tx") return ok({ status: { SuccessValue: v }, transaction_outcome: { id: "TXID" } });
+      throw new Error(`unexpected ${name}`);
+    };
+    const r = await sendSpend(args(keyFile()));
+    assert.equal(r.outcome.status, "allowed");
+    assert.ok(calls.some((c) => c.endsWith(":tx")), "the hash was never looked up");
+  } finally { delete process.env.NEAR_RPC; }
+});
+
+test("InvalidNonce with a lookup that cannot find the hash is NOT CONFIRMED, never rejected", async () => {
+  net({ ...prep, send_tx: () => err({ cause: { name: "INVALID_TRANSACTION" }, data: { InvalidTxError: { InvalidNonce: {} } } }), tx: () => err({ cause: { name: "UNKNOWN_TRANSACTION" } }) });
+  const e = await rejects(sendSpend(args(keyFile())), "unconfirmed");
   assert.ok(e.txHash);
+});
+
+test("an error no endpoint's lag can explain, with the hash still unknown afterwards, is rejected", async () => {
+  net({ ...prep, send_tx: () => err({ cause: { name: "INVALID_TRANSACTION" }, data: { InvalidTxError: "InvalidSignature" } }), tx: () => err({ cause: { name: "UNKNOWN_TRANSACTION" } }) });
+  const e = await rejects(sendSpend(args(keyFile())), "rejected");
+  assert.match(e.message, /InvalidSignature/);
+});
+
+test("a rejected-looking error whose hash then turns up on chain is the chain's answer, not a rejection", async () => {
+  const v = Buffer.from('{"status":"refused","code":4,"reason":"r"}').toString("base64");
+  net({ ...prep, send_tx: () => err({ cause: { name: "INVALID_TRANSACTION" }, data: { InvalidTxError: "InvalidSignature" } }), tx: () => ok({ status: { SuccessValue: v }, transaction_outcome: { id: "TXID" } }) });
+  assert.equal((await sendSpend(args(keyFile()))).outcome.code, 4);
 });
 
 test("a transaction that ran and failed is chain-failed", async () => {
@@ -109,10 +145,18 @@ test("a broadcast that times out but landed is found by its hash", async () => {
   assert.equal(r.outcome.status, "allowed");
 });
 
-test("broadcast limited everywhere and the chain says it does not know the hash is not-sent", async () => {
+test("broadcast limited everywhere and a lagging endpoint says UNKNOWN_TRANSACTION is NOT CONFIRMED, never 'not sent'", async () => {
+  // A retry from a card that said "not sent" could pay twice if the first one landed.
   net({ ...prep, send_tx: limited, tx: () => err({ cause: { name: "UNKNOWN_TRANSACTION" } }) });
-  const e = await rejects(sendSpend(args(keyFile())), "not-sent");
+  const e = await rejects(sendSpend(args(keyFile())), "unconfirmed");
   assert.ok(e.txHash);
+});
+
+test("onSigned is called with the hash before anything is broadcast", async () => {
+  let seen = null, broadcastSawHash = null;
+  net({ ...prep, send_tx: () => { broadcastSawHash = seen; return err({ cause: { name: "INVALID_TRANSACTION" }, data: "InvalidSignature" }); }, tx: () => err({ cause: { name: "UNKNOWN_TRANSACTION" } }) });
+  await rejects(sendSpend({ ...args(keyFile()), onSigned: (h) => { seen = h; } }), "rejected");
+  assert.ok(seen && broadcastSawHash === seen);
 });
 
 test("broadcast limited and the chain then unreachable is unconfirmed, never not-sent", async () => {

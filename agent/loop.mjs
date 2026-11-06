@@ -16,7 +16,7 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { decide, formatUnits, parseUnits } from "./decide.mjs";
 import { readLog as chainLog, readView as chainView, makeReader } from "./chain.mjs";
-import { sendSpend } from "./send.mjs";
+import { sendSpend, lookupTx, describeResult } from "./send.mjs";
 import { loadSent, saveSent } from "./sentstore.mjs";
 import { parseInstruction } from "./parse.mjs";
 
@@ -34,31 +34,32 @@ const fromRecord = (e) => ({
   spentAfter: e.spent_after,
 });
 
-// Statuses that are only this process's belief. "allowed", "refused" and "failed" are the
-// chain's words; everything else is ours and is re-checked against the chain every time.
-// "unknown" and "error" are here on purpose: a send that timed out or exited non-zero can
-// still have landed and been refused, and a screen that keeps saying "error" while the chain
-// says "refused" is the latch bug under another name.
-const PROVISIONAL = new Set(["in-flight", "unknown", "error"]);
+// Only "in-flight" is re-checked against the chain's log: it is this process's belief that a send
+// is still running, and the log may show the decision before the send call returns.
+//
+// "unknown" (sent, not confirmed) is NOT settled from the log. It has a transaction hash, and the
+// only thing that may resolve it is a lookup of that hash (resolveUnconfirmed below). And the
+// named endings (error: not-sent, rejected, chain-failed) are final: letting a log match settle
+// them let a "could not reach the chain" card flip into "refused by the chain" because an
+// identical refusal had happened a minute earlier. Those two statements must never be
+// interchangeable on screen.
+const PROVISIONAL = new Set(["in-flight"]);
 
-// Local clock vs block time: how far back a record may be stamped and still count as ours when
-// the pre-send count is unknown.
-const CLOCK_SKEW_MS = 60_000;
-
-// A provisional action is settled by the newest record, written since it was sent, for the
-// same agent, payee and amount. Whatever the chain recorded wins, refusals included. Anything
-// already final is returned untouched.
+// A provisional action is settled by the newest record, written since it was sent, for the same
+// agent, payee and amount, counted from the log size taken just before the send. When that
+// count is unknown (the pre-send read failed) nothing is matched: there is no timestamp
+// fallback, because a stamp cannot tell this attempt from an identical earlier one. It stays
+// in-flight until the send's own result arrives. Whatever the chain recorded wins, refusals
+// included. Anything already final is returned untouched.
 export function settle(action, chain) {
   if (!action || !PROVISIONAL.has(action.status)) return action;
   const known = action.countBefore != null && action.strangersBefore != null;
+  if (!known) return action;
   const newer = (list, count, before) => list.slice(0, Math.max(0, count - before));
-  const candidates = known
-    ? [
-        ...newer(chain.decisions, chain.decision_count, action.countBefore),
-        ...newer(chain.strangers, chain.stranger_count, action.strangersBefore),
-      ]
-    // The pre-send read failed, so "new since" cannot be counted; fall back to the stamp.
-    : [...chain.decisions, ...chain.strangers].filter((e) => e.timestamp_ms >= action.at - CLOCK_SKEW_MS);
+  const candidates = [
+    ...newer(chain.decisions, chain.decision_count, action.countBefore),
+    ...newer(chain.strangers, chain.stranger_count, action.strangersBefore),
+  ];
   const hit = candidates.find((e) => sameAttempt(e, action));
   return hit ? { ...action, ...fromRecord(hit), settledBy: "chain" } : action;
 }
@@ -90,7 +91,9 @@ export function matchTxs(sent, chain) {
 
 // Keeps the hash of a payment this process sent, and saves the record (state.save, set in start()).
 function remember(state, entry) {
-  (state.sent ??= []).push(entry);
+  state.sent ??= [];
+  const i = state.sent.findIndex((e) => e.tx === entry.tx);
+  if (i >= 0) state.sent[i] = entry; else state.sent.push(entry);
   if (state.sent.length > 40) state.sent.shift();
   state.save?.();
 }
@@ -117,32 +120,49 @@ export async function sendAndRecord(state, intent, { send, readLog }) {
     tx: null,
     at: Date.now(),
   });
+  // Remember the hash the moment it exists (after signing, before the broadcast), so an agent
+  // killed mid-send still has the link to what it may have sent.
+  const onSigned = (hash) => {
+    action.tx = hash;
+    remember(state, { ...attempt, tx: hash, at: action.at, countBefore: action.countBefore, strangersBefore: action.strangersBefore });
+  };
   try {
-    const sent = await send(intent);
-    action.tx = sent.txHash ?? null;
-    let after = null;
-    try { after = await readLog(); } catch { /* fall back to the return value below */ }
-    let next = after ? settle(action, after) : action;
-    // The chain has not shown the record yet, or could not be read. spend's own return value
-    // is the chain speaking too (a refusal returns immediately), so use it, but say so.
-    if (next.status === "in-flight" && sent.outcome?.status) {
-      next = { ...next, status: sent.outcome.status, code: sent.outcome.code ?? null, reason: sent.outcome.reason ?? null, settledBy: "return-value" };
-    }
-    if (next.status === "in-flight") {
-      next = { ...next, status: "unknown", reason: "sent, but the chain has not recorded it yet" };
-    }
-    state.lastAction = next;
+    const sent = await send(intent, { onSigned });
+    action.tx = sent.txHash ?? action.tx;
+    // spend's return value, from this transaction's own final result, is the chain speaking about
+    // exactly this payment.
+    state.lastAction = sent.outcome?.status
+      ? { ...action, status: sent.outcome.status, code: sent.outcome.code ?? null, reason: sent.outcome.reason ?? null, settledBy: "transaction" }
+      : { ...action, status: "unknown", errorKind: "unconfirmed", reason: "sent, but its result could not be read" };
     if (action.tx) remember(state, { ...attempt, tx: action.tx, at: action.at, countBefore: action.countBefore, strangersBefore: action.strangersBefore });
   } catch (err) {
-    // SendError names how it ended (send.mjs); anything else is an unexpected failure of ours.
-    // "unconfirmed" is the one ending where the chain may still have the payment: it stays
-    // provisional ("unknown") so settle() keeps checking the log for it.
+    // SendError names how it ended (send.mjs); anything else is an unexpected failure of ours,
+    // final and unnamed. "unconfirmed" is the one ending where the chain may still have the
+    // payment; resolveUnconfirmed keeps asking for that exact hash.
     const kind = err?.kind ?? null;
     const status = kind === "unconfirmed" ? "unknown" : "error";
     state.lastAction = { ...action, status, errorKind: kind, tx: err?.txHash ?? action.tx, reason: String(err.message ?? err).slice(0, 300) };
-    if (err?.txHash) remember(state, { ...attempt, tx: err.txHash, at: action.at, countBefore: action.countBefore, strangersBefore: action.strangersBefore });
+    if (state.lastAction.tx) remember(state, { ...attempt, tx: state.lastAction.tx, at: action.at, countBefore: action.countBefore, strangersBefore: action.strangersBefore });
   }
   return state.lastAction;
+}
+
+// An unconfirmed send is resolved by asking the chain about its exact hash, never by guessing from
+// the log. `lookup(hash)` is send.mjs's lookupTx. Stops as soon as the action on screen is no
+// longer this one (a new instruction replaced it) or after `tries` rounds.
+export async function resolveUnconfirmed(state, hash, { lookup, tries = 60, waitMs = 5_000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
+  for (let i = 0; i < tries; i++) {
+    const a = state.lastAction;
+    if (!a || a.tx !== hash || a.status !== "unknown") return false;
+    const r = await lookup(hash).catch(() => ({ state: "unreachable" }));
+    if (r.state === "found") {
+      const d = describeResult(r.result);
+      if (state.lastAction?.tx === hash) state.lastAction = { ...state.lastAction, ...d, settledBy: "transaction-lookup" };
+      return true;
+    }
+    await sleep(waitMs);
+  }
+  return false;
 }
 
 // --- what /state returns ---------------------------------------------------------------
@@ -259,7 +279,7 @@ export function start(cfg = config()) {
   // Around a send the log must be current, not up to 5 s old: the pre-send count decides which
   // entries are "mine".
   const readLogFresh = () => chainLog(cfg.wallet, reader, { fresh: true });
-  const send = (i) => sendSpend({ wallet: cfg.wallet, agent: cfg.agentAddr, keyFile: cfg.keyFile, token: i.token, payee: i.payee, amount: i.amount });
+  const send = (i, hooks) => sendSpend({ wallet: cfg.wallet, agent: cfg.agentAddr, keyFile: cfg.keyFile, token: i.token, payee: i.payee, amount: i.amount, ...hooks });
 
   const json = (res, code, body) => {
     res.writeHead(code, { "content-type": "application/json", "access-control-allow-origin": "*", "access-control-allow-headers": "content-type" });
@@ -306,6 +326,7 @@ export function start(cfg = config()) {
         // the thing worth recording.
         const done = await sendAndRecord(state, intent, { send, readLog: readLogFresh });
         readView({ fresh: true }).catch(() => {}); // the budget just moved; refresh what /state serves
+        if (done.status === "unknown" && done.tx) resolveUnconfirmed(state, done.tx, { lookup: (h) => lookupTx({ hash: h, agent: cfg.agentAddr }) });
         return json(res, 200, { prediction: intent.prediction, lastAction: done });
       }
       json(res, 404, { error: "not found" });

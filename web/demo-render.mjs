@@ -84,7 +84,7 @@ export function renderAction(a, reasons) {
         reason: a.reason ?? sentenceFor(a.code, reasons),
         note: "No money moved.",
         txNote: a.tx
-          ? "This transaction shows as succeeded, on purpose. The contract returns a refusal instead of reverting, so the decision and its reason are kept on-chain. A reverted transaction would have left no record."
+          ? "This transaction SUCCEEDED, and that is the point. The contract returns the refusal instead of reverting, so the decision and its reason stay on the chain. A reverted transaction would have left no record at all."
           : null };
     case "failed":
       return { ...base, tone: "failed", label: "FAILED", moved: false,
