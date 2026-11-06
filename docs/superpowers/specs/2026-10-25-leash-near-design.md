@@ -39,7 +39,7 @@ account model. Nothing is ported; the primitives are different enough that the d
 | 1 | **Pure NEAR.** Money and rules both on NEAR. | Two weeks, solo. Chain Signatures adds MPC latency and failure modes to a live demo. | Rules on NEAR, money on Ethereum via Chain Signatures — listed in the README as the next step, not built. |
 | 2 | **Widening a rule requires a passkey signature verified on-chain.** | Keeps the "a human was present" beat from the previous demo without inventing a trust assumption — qualified by the registration caveat in "What this proves, stated precisely". | World ID: its identity-tree root lives on World Chain and NEAR has no message channel to it; we would have to run the relayer ourselves and the uniqueness claim would rest on our own server. Rejected on honesty grounds. |
 | 3 | **Fallback: 24h timelock on widening.** Decision point **5 Nov**. | On-chain P-256/WebAuthn verification is the one genuinely novel piece of engineering here. It gets built first and it gets a hard abandon date. | Building it last and discovering on 13 Nov that it does not fit in gas. |
-| 4 | **The wallet account holds no full-access key.** | NEAR lets an account delete every full-access key. Code then cannot be redeployed and behaviour is fixed — including against the owner. Money has exactly one exit: `spend`. | Keeping an owner key "just in case", which reduces the claim to "the agent has no permission" — strictly weaker and already done on Ethereum. |
+| 4 | **The wallet account holds no full-access key.** | NEAR lets an account delete every full-access key. Code then cannot be redeployed and behaviour is fixed — including against the owner. Money has exactly two exits: `spend`, which the agents call and the contract decides, and `withdraw`, which needs a passkey; neither opens for the admin key alone. | Keeping an owner key "just in case", which reduces the claim to "the agent has no permission" — strictly weaker and already done on Ethereum. |
 | 5 | **The budget unit is the agent's parent account.** | Only `ops.leash.testnet` can create `pay.ops.leash.testnet`. Membership of a budget is enforced by the protocol's naming rule, so there is no registry, no binding transaction, and no lookup. | An explicit `bind_agent` registry, i.e. re-implementing on NEAR something NEAR already guarantees. |
 | 6 | **Rules live in the wallet contract's own state, writable only by ADMIN.** | NEAR cross-contract calls are asynchronous; reading rules from a separate contract would put a block boundary between judgement and payment. | A separate rules contract read per spend. |
 | 7 | **No indexer. Last 20 decisions in a bounded ring buffer, read by view call.** | View calls are free, synchronous, unthrottled. The previous demo's subgraph hit a 429 mid-recording. | A subgraph / Goldsky pipeline as a demo dependency. Optional afterwards, never load-bearing. |
@@ -433,9 +433,9 @@ Five beats, recorded in segments (no one-take constraint this time; no 4-minute 
 but keep it under five minutes).
 
 0. **Evidence first.** `near account list-keys wallet.leash.testnet` → an empty table. "The
-   account that holds the money has no keys. Nobody can sign as it, including me. The only way
-   out for the money is `spend`, and `spend` is called from the agents' own accounts and
-   decided by the contract." Then `near account list-keys pay.ops.leash.testnet` → one key,
+   account that holds the money has no keys. Nobody can sign as it, including me. Money leaves
+   by exactly two doors: `spend`, which the agents call from their own accounts and the contract
+   decides, and `withdraw`, which needs a passkey. Neither opens for the admin key alone." Then `near account list-keys pay.ops.leash.testnet` → one key,
    function-call, `spend` on the wallet and nothing else.
 1. **A payment that passes.** Agent 1 pays a known vendor; transaction link.
 2. **A payment the chain refuses.** Agent 1 is instructed to pay an unknown payee. The

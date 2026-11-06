@@ -258,7 +258,7 @@ export function renderWalletKeys(list, wallet) {
   if (keys.length === 0) {
     return { known: true, count: 0, tone: "zero", keys,
       headline: "The wallet has zero keys",
-      detail: "The account that holds the money has no access keys of any kind, so nobody can sign as it. The only way money leaves is spend, which an agent calls from its own account and the contract decides." };
+      detail: "The account that holds the money has no access keys of any kind, so nobody can sign as it. Money leaves by exactly two doors: spend, which an agent calls from its own account and the contract decides, and withdraw, which needs a passkey. Neither opens for the admin key alone." };
   }
   return { known: true, count: keys.length, tone: "keys", keys,
     headline: `The wallet still has ${keys.length} key${keys.length === 1 ? "" : "s"}`,

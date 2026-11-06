@@ -236,6 +236,9 @@ test("renders the wallet's empty key list as the headline fact", () => {
   assert.match(w.headline, /no keys|zero keys|0 keys/i);
   assert.match(w.detail, /nobody can sign as it/i);
   assert.match(w.detail, /spend/);
+  assert.match(w.detail, /withdraw/);
+  assert.match(w.detail, /passkey/);
+  assert.doesNotMatch(w.detail, /only way money leaves/i);
 });
 
 test("a wallet that still has a key does not get the headline", () => {
