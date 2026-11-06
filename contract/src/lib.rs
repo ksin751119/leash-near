@@ -9,11 +9,11 @@ pub mod webauthn;
 use crate::challenge::{
     gate_challenge, set_rule_payload, ACTION_ADD_PAYEE, ACTION_SET_RULE, ACTION_UNPAUSE,
 };
-use crate::decision::{Decision, Outcome, RefusalView, REFUSALS};
+use crate::decision::{Decision, DecisionLog, Outcome, RefusalView, REFUSALS};
 use crate::node::node_of;
 use crate::rule::{classify, Change, Rule};
 use crate::spend::{evaluate, Attempt};
-use crate::state::{State, MAX_CREDENTIALS};
+use crate::state::{Reservation, State, MAX_CREDENTIALS};
 use crate::webauthn::{verify_assertion, Assertion, Credential};
 use near_sdk::json_types::{Base64VecU8, U128};
 use near_sdk::{
@@ -56,8 +56,13 @@ const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
 /// 20 TGas is several times what the test token needs and leaves headroom for a token that
 /// does more. The callback only releases a reservation and rewrites one ring-buffer slot.
 ///
-/// Both are *static* gas, so the figures do not change with however much gas an agent
-/// attaches, and `a_payment_fits_in_gas` measures the whole call against the 300 TGas limit.
+/// These are the whole of what each promise gets: both are dispatched with
+/// `.with_unused_gas_weight(0)`, so the leftover of whatever an agent attached — a `max_gas`
+/// call leaves well over 200 TGas of it — is **not** handed to the token contract. Reserving
+/// before dispatching already makes a re-entrant `spend` safe, so this is not the defence; it
+/// is simply not giving an arbitrary contract 200 TGas to play with for no reason. Without the
+/// weight these would be minimums rather than budgets, and the figures below would not be the
+/// figures. `a_payment_fits_in_gas` measures the whole call against the 300 TGas limit.
 const FT_TRANSFER_GAS: Gas = Gas::from_tgas(20);
 const TRANSFER_CALLBACK_GAS: Gas = Gas::from_tgas(15);
 
@@ -111,7 +116,7 @@ pub struct LeashAccount {
 /// | `remove_payee` | `assert_admin` |
 /// | `set_paused` | `assert_admin`, plus the passkey gate on unpausing |
 /// | `on_payees_registered` | `#[private]` **and** a check that the promise results it was told to expect are present — see its own doc comment |
-/// | `spend` | **Nothing. Deliberately open to any caller** — the rule for the node derived from `predecessor_id` is the only authorisation there is, and a caller with no rule is refused with code 1. See `spend`'s own doc comment |
+/// | `spend` | **Nothing. Deliberately open to any caller** — the rule for the node derived from `predecessor_id` is the only authorisation there is, and a caller with no rule is refused with code 1. The one thing that openness does let an unknown caller write is a decision record, so those go in their own small ring and cannot evict a configured node's; see `state::push_stranger_decision` |
 /// | `on_transfer` | `#[private]` **and** a check that exactly one promise result is present — the same pairing as `on_payees_registered`, for the same reason |
 ///
 /// Everything else here takes `&self` and writes nothing. `on_payees_registered` and
@@ -607,19 +612,32 @@ impl LeashAccount {
         );
 
         if let Err(code) = verdict {
-            self.record(
-                decision::EVENT_REFUSED,
-                Decision {
-                    agent,
-                    node,
-                    payee,
-                    amount: amount.0,
-                    outcome: Outcome::Refused(code),
-                    // The untouched figure: a refusal reserves nothing.
-                    spent_after: spent,
-                    timestamp_ms: now_ms,
-                },
-            );
+            let entry = Decision {
+                agent,
+                node,
+                payee,
+                amount: amount.0,
+                outcome: Outcome::Refused(code),
+                // The untouched figure: a refusal reserves nothing.
+                spent_after: spent,
+                timestamp_ms: now_ms,
+            };
+            // A caller with no rule goes in its own small ring. `spend` is open to anyone on
+            // NEAR, so without the split, twenty calls from one stranger would evict every
+            // real decision from the log the demo reads — see `push_stranger_decision`. The
+            // condition is literally "no rule", which is exactly when `evaluate` answers
+            // code 1.
+            if rule.is_none() {
+                decision::emit(
+                    decision::EVENT_REFUSED,
+                    decision::RING_STRANGERS,
+                    self.state.strangers_written(),
+                    &entry,
+                );
+                self.state.push_stranger_decision(entry);
+            } else {
+                self.record(decision::EVENT_REFUSED, entry);
+            }
             return PromiseOrValue::Value(Outcome::Refused(code));
         }
 
@@ -631,12 +649,13 @@ impl LeashAccount {
         self.state.add_spent(&node, amount.0, now_ms);
         let spent_after = self.state.spent_in_period(&node, now_ms);
         // Read after the reservation, because `add_spent` rolls an elapsed window first. The
-        // callback needs the window this reservation belongs to, so that a release cannot
-        // land on a later one; see `State::release_reservation`.
-        let reserved_window_ms = self
+        // callback needs to know which ledger this reservation belongs to — the window and
+        // the epoch together — so that a release cannot land on one that rolled or was reset
+        // in the meantime; see `State::release_reservation`.
+        let reserved = self
             .state
-            .window_began_ms(&node, now_ms)
-            .unwrap_or_else(|| env::panic_str("internal: a reserved node with no window"));
+            .reservation_of(&node, now_ms)
+            .unwrap_or_else(|| env::panic_str("internal: a reserved node with no ledger"));
 
         let record_id = self.record(
             decision::EVENT_ALLOWED,
@@ -655,11 +674,14 @@ impl LeashAccount {
             ext_ft::ext(token)
                 .with_attached_deposit(ONE_YOCTO)
                 .with_static_gas(FT_TRANSFER_GAS)
+                // Nothing of the caller's leftover gas goes to the token contract.
+                .with_unused_gas_weight(0)
                 .ft_transfer(payee, amount, None)
                 .then(
                     Self::ext(env::current_account_id())
                         .with_static_gas(TRANSFER_CALLBACK_GAS)
-                        .on_transfer(node, record_id, amount, reserved_window_ms),
+                        .with_unused_gas_weight(0)
+                        .on_transfer(node, record_id, amount, reserved),
                 ),
         )
     }
@@ -679,8 +701,8 @@ impl LeashAccount {
     /// checks that the predecessor is this account, and the agent's function-call keys live
     /// **on this account** — so an agent key arrives with exactly that predecessor and sails
     /// through. On its own, `#[private]` would let any key on the wallet account call this
-    /// with any `node`, `amount` and `record_id` it liked: free headroom on a node, and a
-    /// rewritten decision log.
+    /// with any `node`, `amount`, `record_id` and `reserved` it liked: free headroom on a
+    /// node, and a rewritten decision log.
     ///
     /// So it is paired with a check that this really is a callback. `ft_transfer` is dispatched
     /// as exactly one promise, so exactly one promise result must be present; a direct
@@ -694,7 +716,7 @@ impl LeashAccount {
         node: AccountId,
         record_id: u64,
         amount: U128,
-        reserved_window_ms: u64,
+        reserved: Reservation,
     ) -> Outcome {
         require!(
             env::promise_results_count() == 1,
@@ -718,16 +740,16 @@ impl LeashAccount {
         let now_ms = env::block_timestamp_ms();
         let released = self
             .state
-            .release_reservation(&node, amount.0, reserved_window_ms, now_ms);
+            .release_reservation(&node, amount.0, &reserved, now_ms);
         if !released {
-            // The window the reservation belonged to is gone — it rolled, or a signed
-            // widening reset the ledger — so its `spent` was zeroed with it and there is
-            // nothing to give back. Taking the amount off the *current* window would hand
-            // out headroom nobody paid for.
+            // The ledger the reservation belonged to is gone — the window rolled, or a signed
+            // widening reset it — so its `spent` was zeroed with it and there is nothing to
+            // give back. Taking the amount off the *current* ledger would hand out headroom
+            // nobody paid for.
             env::log_str(&format!(
-                "on_transfer: {node}'s transfer of {} failed after its budget window moved on; \
-                 nothing to release",
-                amount.0
+                "on_transfer: {node}'s transfer of {} failed after its budget ledger moved on \
+                 (reserved against window {} epoch {}); nothing to release",
+                amount.0, reserved.window_began_ms, reserved.epoch
             ));
         }
         let spent_after = self.state.spent_in_period(&node, now_ms);
@@ -741,8 +763,12 @@ impl LeashAccount {
     // Views
     // ===================================================================================
 
-    /// The last 20 decisions, newest first. The demo page's whole data source: a view call is
+    /// The last 20 decisions of callers whose node has a rule, newest first. A view call is
     /// free, synchronous and unthrottled, so there is no indexer anywhere in this project.
+    ///
+    /// Refusals of callers with **no** rule are not here; they are in
+    /// `recent_stranger_decisions`, so that a stranger cannot evict these. `decision_log`
+    /// returns both.
     ///
     /// An `Allowed` entry means policy allowed it and the transfer was dispatched. It becomes
     /// `Failed` if the transfer failed, one block later; it is not rewritten on success, so
@@ -759,6 +785,34 @@ impl LeashAccount {
     /// which overflow a JavaScript number, and a count of payments does not.
     pub fn decision_count(&self) -> u64 {
         self.state.decisions_written()
+    }
+
+    /// The last few refusals of callers whose derived node has **no rule** — refusal code 1 —
+    /// newest first, out of their own small ring.
+    ///
+    /// Separate from `recent_decisions` because `spend` is open to anyone on NEAR: without the
+    /// split, twenty calls from a stranger would evict every real decision from the log this
+    /// demo reads. These refusals are still worth showing — "an unknown agent is refused, and
+    /// you can see it" is part of what the contract is for — so they are kept, in a space
+    /// where they can only crowd out each other.
+    pub fn recent_stranger_decisions(&self) -> Vec<Decision> {
+        self.state.recent_stranger_decisions()
+    }
+
+    /// How many callers with no rule have ever been refused. Where a flood shows up: the ring
+    /// stays four long, this number does not.
+    pub fn stranger_count(&self) -> u64 {
+        self.state.strangers_written()
+    }
+
+    /// Both logs and both counts in one call, which is what the demo page reads.
+    pub fn decision_log(&self) -> DecisionLog {
+        DecisionLog {
+            decisions: self.state.recent_decisions(),
+            decision_count: self.state.decisions_written(),
+            strangers: self.state.recent_stranger_decisions(),
+            stranger_count: self.state.strangers_written(),
+        }
     }
 
     /// Every reason this contract can refuse a payment: the code and the sentence, from the
@@ -981,7 +1035,7 @@ impl LeashAccount {
     /// without announcing it or announce one it never logged.
     fn record(&mut self, event: &str, entry: Decision) -> u64 {
         let id = self.state.push_decision(entry.clone());
-        decision::emit(event, id, &entry);
+        decision::emit(event, decision::RING_DECISIONS, id, &entry);
         id
     }
 
@@ -993,7 +1047,7 @@ impl LeashAccount {
     /// what the callback knows rather than nothing at all. See `decision::emit_evicted`.
     fn announce(&self, event: &str, record_id: u64, node: &AccountId, amount: u128) {
         match self.state.decision(record_id) {
-            Some(entry) => decision::emit(event, record_id, entry),
+            Some(entry) => decision::emit(event, decision::RING_DECISIONS, record_id, entry),
             None => decision::emit_evicted(event, record_id, node, amount),
         }
     }

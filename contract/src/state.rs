@@ -72,7 +72,7 @@
 //! - `nodes` grows only when ADMIN configures a new node, one bounded record each.
 
 use crate::rule::Rule;
-use crate::decision::{Decision, Outcome, RING_CAPACITY};
+use crate::decision::{Decision, Outcome, RING_CAPACITY, STRANGER_RING_CAPACITY};
 use crate::webauthn::Credential;
 use near_sdk::store::{IterableMap, Vector};
 use near_sdk::{near, AccountId, BorshStorageKey};
@@ -94,6 +94,7 @@ enum Prefix {
     // Appended, not inserted: these are borsh discriminants, so reordering them would point
     // the live maps at each other's storage.
     Decisions,
+    Strangers,
 }
 
 /// A node's rule, its ledger, and the two counters that must not live inside the rule.
@@ -115,16 +116,32 @@ pub struct NodeRecord {
     pub spent: u128,
 }
 
+/// The ledger incarnation a reservation belongs to. Travels through `spend`'s callback so
+/// that a release cannot land on a ledger that was rolled or reset in the meantime; see
+/// [`State::release_reservation`].
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reservation {
+    /// Start of the budget window the reservation was made in.
+    pub window_began_ms: u64,
+    /// The node's epoch at that moment — how many accepted loosenings had reset its ledger.
+    pub epoch: u32,
+}
+
 #[near(serializers = [borsh])]
 pub struct State {
     nodes: IterableMap<AccountId, NodeRecord>,
     credentials: IterableMap<Vec<u8>, Credential>,
-    /// The decision ring. At most [`RING_CAPACITY`] entries; slot `id % RING_CAPACITY` holds
-    /// decision `id`. See [`State::push_decision`].
+    /// The decision ring, for callers whose node has a rule. At most [`RING_CAPACITY`]
+    /// entries; slot `id % RING_CAPACITY` holds decision `id`. See [`State::push_decision`].
     decisions: Vector<Decision>,
     /// How many decisions have ever been written. Also the id the next one gets, which is
     /// what lets a callback find its own record without a second index.
     decisions_written: u64,
+    /// A second, much smaller ring for callers whose derived node has **no rule** — refusal
+    /// code 1. See [`State::push_stranger_decision`] for why this is not the same ring.
+    strangers: Vector<Decision>,
+    strangers_written: u64,
 }
 
 impl Default for State {
@@ -140,6 +157,8 @@ impl State {
             credentials: IterableMap::new(Prefix::Credentials),
             decisions: Vector::new(Prefix::Decisions),
             decisions_written: 0,
+            strangers: Vector::new(Prefix::Strangers),
+            strangers_written: 0,
         }
     }
 
@@ -269,39 +288,65 @@ impl State {
         }
     }
 
-    /// Release a reservation whose transfer failed. Rolls first, for the same reason, and
-    /// floors at zero rather than wrapping.
+    /// Take `amount` back off a node's `spent`. Rolls first, for the same reason as
+    /// `add_spent`, and floors at zero rather than wrapping.
     ///
-    /// Prefer [`State::release_reservation`] for a transfer that failed: it checks that the
-    /// reservation still belongs to the current window first.
-    pub fn sub_spent(&mut self, node: &AccountId, amount: u128, now_ms: u64) {
+    /// **Private, deliberately.** A bare subtraction is the wrong thing to do when a transfer
+    /// fails: the callback runs a block later, so the ledger it subtracts from may no longer
+    /// be the one that was reserved against. [`State::release_reservation`] is the only
+    /// caller, and it checks that first. Leaving this on the public surface would invite the
+    /// next caller to reach for the wrong one, so the lesson lives in the type system rather
+    /// than in a doc comment.
+    fn sub_spent(&mut self, node: &AccountId, amount: u128, now_ms: u64) {
         self.roll_window(node, now_ms);
         if let Some(r) = self.nodes.get_mut(node) {
             r.spent = r.spent.saturating_sub(amount);
         }
     }
 
-    /// Release a reservation that was made in the window beginning at `reserved_window_ms`.
-    /// Returns whether anything was released.
+    /// Which ledger a reservation was made against: the window it fell in, and the epoch that
+    /// window belonged to.
     ///
-    /// **The window check is the point of this method.** A reservation is made in `spend` and
+    /// `None` for a node with no rule, which has no ledger. Window-aware: an elapsed window
+    /// reports the one a spend arriving now would land in, not the stale recorded figure.
+    pub fn reservation_of(&self, node: &AccountId, now_ms: u64) -> Option<Reservation> {
+        let epoch = self.nodes.get(node)?.epoch;
+        Some(Reservation { window_began_ms: self.window_began_ms(node, now_ms)?, epoch })
+    }
+
+    /// Release a reservation that was made against `against`. Returns whether anything was
+    /// released.
+    ///
+    /// **The check is the point of this method.** A reservation is made in `spend` and
     /// released in the callback, which runs in a later block — so a period boundary, or an
     /// accepted widening, can fall between the two. A plain `sub_spent` would then take the
-    /// amount off whatever window is current *now*, handing a node free headroom it never
-    /// paid for: reserve 500 at the end of a period, roll, another agent spends 500 in the new
+    /// amount off whatever ledger is current *now*, handing a node free headroom it never paid
+    /// for: reserve 500 at the end of a period, roll, another agent spends 500 in the new
     /// period, our transfer fails, and the new period's ledger reads zero. With a one-second
     /// test period that is routine rather than theoretical.
     ///
-    /// If the window has moved on there is nothing to release: the reservation's window is
-    /// gone, and `roll_window` already zeroed its `spent` (or an accepted widening did).
+    /// The **epoch** is checked as well as the window start, and not for symmetry: an accepted
+    /// widening resets the window to `now_ms`, so a widening landing in a block whose timestamp
+    /// equals the reserving window's own start produces a fresh, zeroed ledger that a
+    /// window-only check cannot tell from the old one. The stale release would then take a live
+    /// reservation with it. That needs ADMIN and a passkey inside one block, so it is
+    /// vanishing rather than reachable — but this is the money path and the fix is exact.
+    ///
+    /// `epoch`, not `version`: the epoch advances on exactly the thing that resets a ledger
+    /// (an accepted widening) and never on a tightening, which is the distinction a release
+    /// needs. `version` moves on every accepted change, so it would refuse releases after a
+    /// tightening that left the ledger alone.
+    ///
+    /// If either half has moved on there is nothing to release: the reservation's ledger is
+    /// gone, and `roll_window` already zeroed its `spent` (or the widening did).
     pub fn release_reservation(
         &mut self,
         node: &AccountId,
         amount: u128,
-        reserved_window_ms: u64,
+        against: &Reservation,
         now_ms: u64,
     ) -> bool {
-        if self.window_began_ms(node, now_ms) != Some(reserved_window_ms) {
+        if self.reservation_of(node, now_ms).as_ref() != Some(against) {
             return false;
         }
         self.sub_spent(node, amount, now_ms);
@@ -368,6 +413,52 @@ impl State {
     /// is full. Also the id the next one will get.
     pub fn decisions_written(&self) -> u64 {
         self.decisions_written
+    }
+
+    // --- the stranger ring ------------------------------------------------------------
+
+    /// Record a decision for a caller whose derived node has **no rule** — refusal code 1 —
+    /// in its own small ring.
+    ///
+    /// # Why this is not the same ring
+    ///
+    /// `spend` is open to any caller on NEAR, by design: the rule for the derived node is the
+    /// whole of the authorisation, and a caller with no rule is *answered* rather than turned
+    /// away at the door. But that means anyone with a testnet account and a few hundred
+    /// microNEAR can call it, and [`RING_CAPACITY`] such calls would evict every real decision
+    /// from the log. The ring is the demo's evidence — the screen that shows what the chain
+    /// refused and why reads from it — so one bored onlooker could blank it mid-recording.
+    ///
+    /// Two rings, and strangers can only evict strangers. Code 1 stays visible, because "an
+    /// unknown agent is refused, and you can see it" is part of what this contract is for; it
+    /// just lives in its own bounded space. [`STRANGER_RING_CAPACITY`] is small because this
+    /// ring exists to prove the refusal happens, not to keep a history of it.
+    ///
+    /// No id is returned: a code 1 refusal never dispatches anything, so nothing ever comes
+    /// back to settle it.
+    pub fn push_stranger_decision(&mut self, decision: Decision) {
+        let id = self.strangers_written;
+        if (self.strangers.len() as u64) < STRANGER_RING_CAPACITY {
+            self.strangers.push(decision);
+        } else {
+            self.strangers.set((id % STRANGER_RING_CAPACITY) as u32, decision);
+        }
+        self.strangers_written = id.saturating_add(1);
+    }
+
+    /// The last [`STRANGER_RING_CAPACITY`] refusals of callers with no rule, newest first.
+    pub fn recent_stranger_decisions(&self) -> Vec<Decision> {
+        let first = self.strangers_written.saturating_sub(STRANGER_RING_CAPACITY);
+        (first..self.strangers_written)
+            .rev()
+            .filter_map(|id| self.strangers.get((id % STRANGER_RING_CAPACITY) as u32).cloned())
+            .collect()
+    }
+
+    /// How many callers with no rule have ever been refused. The interesting number here is
+    /// not the records but the count: it is how a flood shows up at all.
+    pub fn strangers_written(&self) -> u64 {
+        self.strangers_written
     }
 
     // --- credentials ------------------------------------------------------------------
@@ -717,12 +808,12 @@ mod tests {
 
     // --- releasing a reservation, window-aware ----------------------------------------
 
-    /// The ordinary case: the transfer failed inside the window that reserved the money.
+    /// The ordinary case: the transfer failed against the same ledger that reserved the money.
     #[test]
     fn a_failed_transfer_in_the_same_window_releases() {
         let (mut s, node) = spent_node();
-        let window = s.window_began_ms(&node, 5 * DAY).unwrap();
-        assert!(s.release_reservation(&node, 500, window, 5 * DAY));
+        let against = s.reservation_of(&node, 5 * DAY).unwrap();
+        assert!(s.release_reservation(&node, 500, &against, 5 * DAY));
         assert_eq!(s.spent_in_period(&node, 5 * DAY), 7_000);
     }
 
@@ -733,7 +824,7 @@ mod tests {
     #[test]
     fn a_reservation_from_a_rolled_window_is_not_released_against_the_new_one() {
         let (mut s, node) = spent_node();
-        let old_window = s.window_began_ms(&node, 5 * DAY).unwrap();
+        let against = s.reservation_of(&node, 5 * DAY).unwrap();
 
         // The window rolls, and another agent spends 500 of the new period.
         let later = 6 * DAY;
@@ -741,7 +832,7 @@ mod tests {
         assert_eq!(s.spent_in_period(&node, later), 500);
 
         // Now the old reservation's transfer fails.
-        assert!(!s.release_reservation(&node, 7_500, old_window, later));
+        assert!(!s.release_reservation(&node, 7_500, &against, later));
         assert_eq!(
             s.spent_in_period(&node, later),
             500,
@@ -754,13 +845,73 @@ mod tests {
     #[test]
     fn a_reservation_from_before_a_widening_is_not_released() {
         let (mut s, node) = spent_node();
-        let old_window = s.window_began_ms(&node, 5 * DAY).unwrap();
+        let against = s.reservation_of(&node, 5 * DAY).unwrap();
         let now = 5 * DAY + 1_000;
         s.put_rule(&node, rule_with(2_000, 10_000, DAY), true, now);
         s.add_spent(&node, 300, now);
 
-        assert!(!s.release_reservation(&node, 7_500, old_window, now));
+        assert!(!s.release_reservation(&node, 7_500, &against, now));
         assert_eq!(s.spent_in_period(&node, now), 300);
+    }
+
+    /// The case the window start alone cannot catch, and the reason the epoch travels with it.
+    ///
+    /// A widening resets the window to "now". If it lands in a block whose timestamp is
+    /// exactly the reserving window's own start, the fresh zeroed ledger has the *same* window
+    /// start as the one that was reserved against — so a window-only check would accept the
+    /// stale release and take a live reservation with it. It needs ADMIN plus a passkey inside
+    /// one block, so it is vanishing rather than reachable, but this is the money path.
+    #[test]
+    fn a_widening_that_lands_on_the_window_start_is_caught_by_the_epoch() {
+        with_env();
+        let mut s = State::new();
+        let node = acct(NODE);
+        let t = 5 * DAY;
+        s.put_rule(&node, rule(), true, t);
+        s.add_spent(&node, 7_500, t);
+        let against = s.reservation_of(&node, t).unwrap();
+        assert_eq!(against.window_began_ms, t);
+        assert_eq!(against.epoch, 0);
+
+        // A widening in the very same millisecond: same window start, fresh ledger.
+        s.put_rule(&node, rule_with(2_000, 10_000, DAY), true, t);
+        let now = s.reservation_of(&node, t).unwrap();
+        assert_eq!(now.window_began_ms, against.window_began_ms, "the window start is identical");
+        assert_ne!(now.epoch, against.epoch, "only the epoch tells them apart");
+
+        // A live reservation on the new ledger, which the stale release must not touch.
+        s.add_spent(&node, 400, t);
+        assert!(!s.release_reservation(&node, 7_500, &against, t));
+        assert_eq!(s.spent_in_period(&node, t), 400, "a live reservation was released");
+    }
+
+    /// And the other half: a *tightening* does not reset the ledger, so it must not block a
+    /// release either. This is why the check carries `epoch` and not `version` — `version`
+    /// advances on every accepted change, including this one.
+    #[test]
+    fn a_tightening_between_reserve_and_release_does_not_block_it() {
+        let (mut s, node) = spent_node();
+        let against = s.reservation_of(&node, 5 * DAY).unwrap();
+        let now = 5 * DAY + 1_000;
+
+        // Lower the per-transaction limit: a tightening, ungated, ledger untouched.
+        s.put_rule(&node, rule_with(500, 10_000, DAY), false, now);
+        assert_eq!(s.spent_in_period(&node, now), 7_500, "a tightening keeps the ledger");
+        assert!(s.version_of(&node).unwrap() > 0, "but it does advance the version");
+
+        assert!(s.release_reservation(&node, 500, &against, now));
+        assert_eq!(s.spent_in_period(&node, now), 7_000);
+    }
+
+    /// A node with no rule has no ledger to reserve against, so there is nothing to release.
+    #[test]
+    fn a_node_with_no_rule_has_no_reservation() {
+        with_env();
+        let mut s = State::new();
+        let node = acct(NODE);
+        assert!(s.reservation_of(&node, 1_000).is_none());
+        let made_up = Reservation { window_began_ms: 0, epoch: 0 };
+        assert!(!s.release_reservation(&node, 500, &made_up, 1_000));
     }
 
     // --- the decision ring ------------------------------------------------------------
@@ -860,6 +1011,66 @@ mod tests {
         let s = State::new();
         assert!(s.recent_decisions().is_empty());
         assert_eq!(s.decisions_written(), 0);
+        assert!(s.recent_stranger_decisions().is_empty());
+        assert_eq!(s.strangers_written(), 0);
+    }
+
+    // --- the stranger ring ------------------------------------------------------------
+    //
+    // `spend` is open to any caller on NEAR, so anyone can write to the decision log. These
+    // two tests are the whole of the defence: strangers go in their own ring, and they can
+    // only evict each other.
+
+    /// A refusal for a caller with no rule, with no node to name.
+    fn stranger(amount: u128) -> Decision {
+        Decision {
+            agent: acct("nobody.testnet"),
+            node: None,
+            payee: acct("alice.testnet"),
+            amount,
+            outcome: Outcome::Refused(1),
+            spent_after: 0,
+            timestamp_ms: 1_000,
+        }
+    }
+
+    /// The flood, at the level of the data structure: a stranger calling far more than either
+    /// ring holds leaves every real decision exactly where it was.
+    #[test]
+    fn strangers_cannot_evict_real_decisions() {
+        with_env();
+        let mut s = State::new();
+        for i in 1..=3u128 {
+            s.push_decision(decision(i));
+        }
+        for i in 1..=50u128 {
+            s.push_stranger_decision(stranger(i));
+        }
+
+        let real: Vec<u128> = s.recent_decisions().iter().map(|d| d.amount).collect();
+        assert_eq!(real, vec![3, 2, 1], "fifty stranger calls moved a real decision");
+        assert_eq!(s.decisions_written(), 3);
+
+        let theirs: Vec<u128> = s.recent_stranger_decisions().iter().map(|d| d.amount).collect();
+        assert_eq!(theirs.len(), STRANGER_RING_CAPACITY as usize);
+        assert_eq!(theirs.first(), Some(&50), "newest first");
+        assert_eq!(s.strangers_written(), 50, "and the count still shows the flood");
+    }
+
+    /// The other direction: real traffic does not push the stranger refusals out either, so
+    /// code 1 stays visible.
+    #[test]
+    fn real_decisions_do_not_evict_strangers() {
+        with_env();
+        let mut s = State::new();
+        s.push_stranger_decision(stranger(7));
+        for i in 1..=25u128 {
+            s.push_decision(decision(i));
+        }
+        let theirs = s.recent_stranger_decisions();
+        assert_eq!(theirs.len(), 1);
+        assert_eq!(theirs[0].amount, 7);
+        assert_eq!(theirs[0].outcome, Outcome::Refused(1));
     }
 
     #[test]

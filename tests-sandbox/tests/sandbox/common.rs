@@ -517,16 +517,44 @@ pub async fn spent_in_period(fx: &Fixture, node: &str) -> anyhow::Result<u128> {
     Ok(s.parse()?)
 }
 
-/// The decision ring, newest first, as raw JSON — the shape the demo page receives.
+/// The decision ring, newest first, as raw JSON — the shape the demo page receives. Holds
+/// callers whose node has a rule; see [`recent_strangers`] for the rest.
 pub async fn recent_decisions(fx: &Fixture) -> anyhow::Result<Vec<serde_json::Value>> {
     Ok(fx.wallet.view("recent_decisions").await?.json()?)
+}
+
+/// The small ring for callers with no rule at all — refusal code 1. Separate so that a
+/// stranger cannot evict the decisions the demo is there to show.
+pub async fn recent_strangers(fx: &Fixture) -> anyhow::Result<Vec<serde_json::Value>> {
+    Ok(fx.wallet.view("recent_stranger_decisions").await?.json()?)
+}
+
+/// Both rings and both counts in the one view call the demo page makes.
+pub async fn decision_log(fx: &Fixture) -> anyhow::Result<serde_json::Value> {
+    Ok(fx.wallet.view("decision_log").await?.json()?)
+}
+
+/// Whichever ring a refusal with this code lands in, newest first. Code 1 is the stranger
+/// ring; everything else is the main one.
+pub async fn recent_for_code(fx: &Fixture, code: u8) -> anyhow::Result<Vec<serde_json::Value>> {
+    if code == 1 {
+        recent_strangers(fx).await
+    } else {
+        recent_decisions(fx).await
+    }
 }
 
 /// The outcome of the newest decision, parsed back into the contract's own enum through the
 /// wire shape a client sees.
 pub async fn newest_outcome(fx: &Fixture) -> anyhow::Result<leash_contract::decision::Outcome> {
-    let all = recent_decisions(fx).await?;
-    let newest = all.first().ok_or_else(|| anyhow::anyhow!("no decisions recorded"))?;
+    outcome_of_newest(&recent_decisions(fx).await?)
+}
+
+/// The outcome of the newest entry in whichever ring was passed.
+pub fn outcome_of_newest(
+    log: &[serde_json::Value],
+) -> anyhow::Result<leash_contract::decision::Outcome> {
+    let newest = log.first().ok_or_else(|| anyhow::anyhow!("no decisions recorded"))?;
     // Through a string, so this compiles whether or not cargo unified the test's `serde_json`
     // with `near_sdk`'s. Deserialising rather than reading the fields is the point: it checks
     // that the shape a client receives really does parse back into the contract's own enum.

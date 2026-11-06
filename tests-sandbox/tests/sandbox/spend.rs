@@ -20,9 +20,10 @@
 mod common;
 
 use common::{
-    agents, balance_of, build_wasm, deploy_with_token, newest_outcome, pause_account,
-    recent_decisions, register_passkey, restricted_key, rule, rule_json, set_rule_signed, spend,
-    spent_in_period, why, Agents, Fixture, Passkey, HOST_PANIC_IMPORT,
+    agents, balance_of, build_wasm, decision_log, deploy_with_token, newest_outcome,
+    outcome_of_newest, pause_account, recent_decisions, recent_for_code, recent_strangers,
+    register_passkey, restricted_key, rule, rule_json, set_rule_signed, spend, spent_in_period,
+    why, Agents, Fixture, Passkey, HOST_PANIC_IMPORT,
 };
 use leash_contract::decision::Outcome;
 use leash_contract::rule::Rule;
@@ -62,6 +63,9 @@ fn returned_outcome(res: ExecutionFinalResult) -> anyhow::Result<Outcome> {
 /// The demo's triple, in one place: the transaction succeeded, nothing moved, and the chain
 /// recorded why. Also checks the returned value and the node's ledger, both of which a
 /// refusal must leave alone.
+///
+/// Code 1 is read out of the stranger ring rather than the main one — see
+/// `strangers_cannot_evict_a_real_agents_decisions` for why there are two.
 async fn assert_refused(
     fx: &Fixture,
     node: &str,
@@ -92,7 +96,7 @@ async fn assert_refused(
         "the wallet's balance moved on a refusal"
     );
     assert_eq!(
-        newest_outcome(fx).await?,
+        outcome_of_newest(&recent_for_code(fx, code).await?)?,
         Outcome::Refused(code),
         "the recorded decision does not say code {code}"
     );
@@ -138,7 +142,7 @@ async fn an_id_that_derives_to_no_node_is_refused_with_one() -> anyhow::Result<(
         .into_result()?;
 
     assert_refused(&fx, &ag.node, &stranger, &token, ALICE, 1, 1).await?;
-    let newest = &recent_decisions(&fx).await?[0];
+    let newest = &recent_strangers(&fx).await?[0];
     assert!(newest["node"].is_null(), "an underivable node must record as null: {newest}");
     assert_eq!(newest["agent"], json!("agentless"));
     Ok(())
@@ -389,7 +393,13 @@ async fn a_failed_transfer_releases_the_reservation() -> anyhow::Result<()> {
     let amount = held + 1;
 
     let res = spend(&fx, &ag.pay, &token, ALICE, amount).await?;
-    println!("a failed transfer: is_success={} ", res.is_success());
+    // A failed transfer is still a SUCCESSFUL transaction — the same property the seven
+    // refusal tests assert. Only the returned `status` says the money did not move, and a
+    // caller that reads the transaction's status instead would call this a crash.
+    assert!(
+        res.is_success(),
+        "a failed transfer must still arrive in a successful transaction: {res:#?}"
+    );
     for l in res.logs() {
         println!("  log: {l}");
     }
@@ -424,10 +434,14 @@ async fn a_zero_amount_payment_fails_at_the_token() -> anyhow::Result<()> {
     let (fx, _pk, ag) = ready().await?;
     let token = fx.token.id().to_string();
     let res = spend(&fx, &ag.pay, &token, ALICE, 0).await?;
+    assert!(
+        res.is_success(),
+        "a zero-amount payment must still arrive in a successful transaction: {res:#?}"
+    );
+    assert_eq!(returned_outcome(res)?, Outcome::Failed);
     assert_eq!(newest_outcome(&fx).await?, Outcome::Failed);
     assert_eq!(spent_in_period(&fx, &ag.node).await?, 0);
     assert_eq!(balance_of(&fx, ALICE).await?, 0);
-    println!("a zero-amount payment: is_success={}", res.is_success());
     Ok(())
 }
 
@@ -490,6 +504,83 @@ async fn the_ring_buffer_holds_exactly_twenty() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The attack the two rings exist to stop.
+///
+/// `spend` is open to any caller on NEAR — the rule for the derived node is the whole of the
+/// authorisation, and a caller with no rule is *answered* with code 1 rather than turned away.
+/// So anyone with a testnet account and a few hundred microNEAR can write to the decision log,
+/// and twenty such calls into a twenty-slot ring would evict every real decision from it. The
+/// ring is the demo's evidence: the screen that shows what the chain refused and why reads
+/// from it, so one bored onlooker could blank it mid-recording.
+///
+/// Strangers therefore go in their own small ring and can only evict each other. Code 1 stays
+/// visible — "an unknown agent is refused, and you can see it" is part of the story — and
+/// `stranger_count` is where the flood shows up.
+#[tokio::test]
+async fn strangers_cannot_evict_a_real_agents_decisions() -> anyhow::Result<()> {
+    let (fx, _pk, ag) = ready().await?;
+    let token = fx.token.id().to_string();
+
+    // Three real decisions: an allowed payment and two refusals that a demo would be showing.
+    spend(&fx, &ag.pay, &token, ALICE, 100).await?.into_result()?;
+    spend(&fx, &ag.pay, &token, MALLORY, 100).await?.into_result()?;
+    spend(&fx, &ag.pay, &token, ALICE, 5_000).await?.into_result()?;
+    let before = recent_decisions(&fx).await?;
+    assert_eq!(before.len(), 3);
+
+    // One stranger, 20 calls — enough to fill the main ring exactly once over.
+    let sk = SecretKey::from_random(near_workspaces::types::KeyType::ED25519);
+    let onlooker = fx
+        .worker
+        .create_tla("onlooker".parse()?, sk)
+        .await?
+        .into_result()?;
+    for i in 1..=20u128 {
+        let res = spend(&fx, &onlooker, &token, ALICE, i).await?;
+        assert!(res.is_success(), "stranger call {i} did not succeed: {res:#?}");
+        assert_eq!(returned_outcome(res)?, Outcome::Refused(1), "stranger call {i}");
+    }
+
+    // Every real decision is exactly where it was.
+    let after = recent_decisions(&fx).await?;
+    assert_eq!(after, before, "a stranger evicted a real agent's decisions");
+
+    // And the refusals are still visible, in their own bounded space.
+    let strangers = recent_strangers(&fx).await?;
+    assert_eq!(strangers.len(), 4, "the stranger ring must stay small");
+    assert_eq!(strangers[0]["amount"], json!("20"), "newest first");
+    assert_eq!(strangers[0]["outcome"]["code"], json!(1));
+    assert!(strangers[0]["node"].is_null(), "a top-level caller derives to no node");
+
+    let log = decision_log(&fx).await?;
+    assert_eq!(log["decision_count"], json!(3));
+    assert_eq!(log["stranger_count"], json!(20), "the count is where a flood shows up");
+    assert_eq!(log["decisions"].as_array().map(Vec::len), Some(3));
+    assert_eq!(log["strangers"].as_array().map(Vec::len), Some(4));
+    println!(
+        "after 20 stranger calls: decisions={} (count {}), strangers={} (count {})",
+        log["decisions"].as_array().unwrap().len(),
+        log["decision_count"],
+        log["strangers"].as_array().unwrap().len(),
+        log["stranger_count"],
+    );
+    println!("the real decisions, untouched: {}", serde_json::to_string_pretty(&after)?);
+    Ok(())
+}
+
+/// The other half: a node that *has* a rule is not a stranger, however little it is allowed
+/// to spend. Its refusals belong in the main ring, where the demo shows them.
+#[tokio::test]
+async fn a_configured_node_is_never_a_stranger() -> anyhow::Result<()> {
+    let (fx, _pk, ag) = ready().await?;
+    let token = fx.token.id().to_string();
+    // Code 4: a rule exists, the payee is not on it.
+    assert_refused(&fx, &ag.node, &ag.pay, &token, MALLORY, 100, 4).await?;
+    assert_eq!(recent_decisions(&fx).await?.len(), 1);
+    assert!(recent_strangers(&fx).await?.is_empty(), "a configured node is not a stranger");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------------------
 // The callback
 // ---------------------------------------------------------------------------------------
@@ -522,7 +613,18 @@ async fn on_transfer_cannot_be_driven_by_an_agent_key() -> anyhow::Result<()> {
         .args_json(json!({ "node": ag.node }))
         .await?
         .json()?;
-    let window = window.expect("the node has a window");
+    let epoch: Option<u32> = fx
+        .wallet
+        .view("epoch_of")
+        .args_json(json!({ "node": ag.node }))
+        .await?
+        .json()?;
+    // The real reservation's ledger, so the call is as convincing as an attacker could make
+    // it: nothing about the arguments is wrong, and it is still refused.
+    let reserved = json!({
+        "window_began_ms": window.expect("the node has a window"),
+        "epoch": epoch.expect("the node has an epoch"),
+    });
 
     // A deliberately over-broad function-call key on the wallet account, so the call reaches
     // the contract and `#[private]` is satisfied by it.
@@ -545,7 +647,7 @@ async fn on_transfer_cannot_be_driven_by_an_agent_key() -> anyhow::Result<()> {
                 "node": ag.node,
                 "record_id": record_id,
                 "amount": amount,
-                "reserved_window_ms": window,
+                "reserved": reserved,
             }))
             .max_gas()
             .transact()

@@ -33,9 +33,11 @@ The payment path is far cheaper, because no signature is checked on it:
 | `spend` | Gas | What it pays for |
 | --- | --- | --- |
 | allowed | 7.9 TGas | the seven checks, the reservation, `ft_transfer` on the token, and the callback that settles it |
-| refused | 2.6 TGas | the seven checks and one ring-buffer write — no cross-contract call at all |
+| refused | 2.7 TGas | the seven checks and one ring-buffer write — no cross-contract call at all |
 
-Measured by `a_payment_fits_in_gas` in `tests-sandbox/tests/sandbox/spend.rs`. A refused payment is a *successful* transaction: the contract records the decision, emits an event and returns `{"status":"refused","code":4,"reason":"payee is not on the allow-list"}` rather than panicking, because a panic would roll back the record and leave nothing on chain to say why. Each of the seven codes has a test asserting all three things at once — the transaction succeeded, no balance moved, and the recorded decision names the code.
+Measured by `a_payment_fits_in_gas` in `tests-sandbox/tests/sandbox/spend.rs`. Neither promise is given the caller's leftover gas (`with_unused_gas_weight(0)`), so the token contract is never handed the ~200 TGas an agent's `max_gas` call has spare. A refused payment is a *successful* transaction: the contract records the decision, emits an event and returns `{"status":"refused","code":4,"reason":"payee is not on the allow-list"}` rather than panicking, because a panic would roll back the record and leave nothing on chain to say why. Each of the seven codes has a test asserting all three things at once — the transaction succeeded, no balance moved, and the recorded decision names the code.
+
+The decision log is two bounded rings, not one. `spend` is open to any caller on NEAR — the rule for the node derived from the caller's id is the whole of the authorisation, and a caller with no rule is answered with code 1 rather than turned away — so anyone can write to the log, and twenty calls from one stranger would evict every real decision from a single twenty-slot ring. Refusals of callers with no rule therefore go in their own four-slot ring: strangers can only evict strangers, code 1 stays visible, and `stranger_count()` is where a flood shows up. `strangers_cannot_evict_a_real_agents_decisions` pins it.
 
 Every figure here is from the same sandbox on the same machine, so they are comparable to each other and are not a claim about any particular validator. They are quoted to one decimal because the exact gas count moves a little between runs: the sandbox creates accounts named `dev-<timestamp>-<random>`, and an account id's length is part of what a receipt costs. Run the tests above to see the current numbers.
 

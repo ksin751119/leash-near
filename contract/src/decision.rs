@@ -38,14 +38,21 @@ pub const EVENT_ALLOWED: &str = "allowed";
 pub const EVENT_SETTLED: &str = "settled";
 pub const EVENT_FAILED: &str = "failed";
 
-/// Emit a NEP-297 event carrying one whole decision.
+/// The two bounded logs a decision can land in, as they are named on the wire. A consumer
+/// reads them back through `recent_decisions()` and `recent_stranger_decisions()`
+/// respectively, so the event says which one to look in.
+pub const RING_DECISIONS: &str = "decisions";
+pub const RING_STRANGERS: &str = "strangers";
+
+/// Emit a NEP-297 event carrying one whole decision, and the ring it was recorded in.
 ///
 /// Events are emitted *in parallel* with the ring buffer, never instead of it: the demo reads
 /// state with free view calls and depends on no indexer at all. These exist so that a real
 /// indexer could be attached later.
-pub fn emit(event: &str, record_id: u64, d: &Decision) {
+pub fn emit(event: &str, ring: &str, record_id: u64, d: &Decision) {
     let mut data = serde_json::to_value(d).unwrap_or(serde_json::Value::Null);
     if let Some(obj) = data.as_object_mut() {
+        obj.insert("ring".to_string(), json!(ring));
         obj.insert("record_id".to_string(), json!(record_id));
     }
     emit_raw(event, data);
@@ -59,6 +66,7 @@ pub fn emit_evicted(event: &str, record_id: u64, node: &AccountId, amount: u128)
     emit_raw(
         event,
         json!({
+            "ring": RING_DECISIONS,
             "record_id": record_id,
             "node": node,
             "amount": amount.to_string(),
@@ -83,6 +91,17 @@ fn emit_raw(event: &str, data: serde_json::Value) {
 /// and the account stakes the storage for every one of them, so this is a chosen number
 /// rather than a growing one.
 pub const RING_CAPACITY: u64 = 20;
+
+/// How many refusals of callers with **no rule** are kept, in their own ring.
+///
+/// `spend` is open to any caller on NEAR — that is the design, and a caller with no rule is
+/// answered with code 1 rather than turned away. The consequence is that anyone can write to
+/// the log, and [`RING_CAPACITY`] calls from one stranger would evict every real decision from
+/// it. So those refusals go in a separate, deliberately tiny ring: strangers can only evict
+/// strangers, and the evidence the demo reads cannot be blanked by an onlooker with a testnet
+/// account. Four is enough to show the refusal happening and small enough that the flood is
+/// obvious in `stranger_count()` rather than hidden in a long list.
+pub const STRANGER_RING_CAPACITY: u64 = 4;
 
 /// The seven refusal codes, by name. The numbers are part of the contract's public surface —
 /// the agent processes branch on them — so they are written once, here, and never derived
@@ -194,6 +213,21 @@ impl TryFrom<OutcomeView> for Outcome {
             (other, _) => Err(format!("unknown outcome status {other:?}")),
         }
     }
+}
+
+/// Both logs and both counts in one view call, so a client never has to decide which of two
+/// calls to make or stitch the answers together itself.
+///
+/// `decisions` is what agents with a configured node did; `strangers` is callers with no rule
+/// at all, in their own small ring so that they cannot evict the former. The counts are how
+/// many have *ever* been recorded, which is the only way to see a flood: twenty stranger
+/// calls leave `strangers` four long and `stranger_count` at twenty.
+#[near(serializers = [json])]
+pub struct DecisionLog {
+    pub decisions: Vec<Decision>,
+    pub decision_count: u64,
+    pub strangers: Vec<Decision>,
+    pub stranger_count: u64,
 }
 
 /// One entry in the ring buffer: everything the demo page shows about one attempt.
