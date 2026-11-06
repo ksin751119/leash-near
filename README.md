@@ -252,7 +252,7 @@ Last run, on this branch:
 | Command | Result |
 | --- | --- |
 | `cargo test` | 216 passed, 0 failed: 119 contract unit tests, 97 sandbox tests (frozen account 3, concurrency 4, keys 8, rules 45, spend 22, token 1, passkey verification 2, withdraw 12) |
-| `node --test agent/*.test.mjs web/*.test.mjs scripts/*.test.mjs` | 306 passed, 0 failed, 0 skipped: 256 in `agent/` and `web/`, 50 in `scripts/` |
+| `node --test agent/*.test.mjs web/*.test.mjs scripts/*.test.mjs` | 310 passed, 0 failed, 0 skipped: 260 in `agent/` and `web/`, 50 in `scripts/` |
 
 To see a gas figure: `cargo test --test spend -- --nocapture` (also `rules`, `widen_requires_passkey`,
 `withdraw`). The fixtures under `tests-sandbox/tests/fixtures/` are generated, not browser-captured
