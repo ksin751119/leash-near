@@ -10,7 +10,7 @@
 // left "in-flight" by a send that ended any way at all: that was the previous project's
 // latch bug (a refusal never cleared the in-flight card, because only success did).
 import { createServer } from "node:http";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
@@ -33,22 +33,37 @@ const fromRecord = (e) => ({
   spentAfter: e.spent_after,
 });
 
-// An in-flight action is settled by the newest record, written since it was sent, for the
+// Statuses that are only this process's belief. "allowed", "refused" and "failed" are the
+// chain's words; everything else is ours and is re-checked against the chain every time.
+// "unknown" and "error" are here on purpose: a send that timed out or exited non-zero can
+// still have landed and been refused, and a screen that keeps saying "error" while the chain
+// says "refused" is the latch bug under another name.
+const PROVISIONAL = new Set(["in-flight", "unknown", "error"]);
+
+// Local clock vs block time: how far back a record may be stamped and still count as ours when
+// the pre-send count is unknown.
+const CLOCK_SKEW_MS = 60_000;
+
+// A provisional action is settled by the newest record, written since it was sent, for the
 // same agent, payee and amount. Whatever the chain recorded wins, refusals included. Anything
-// not in flight is returned untouched.
+// already final is returned untouched.
 export function settle(action, chain) {
-  if (!action || action.status !== "in-flight") return action;
-  const newer = (list, count, before) => list.slice(0, Math.max(0, count - (before ?? count)));
-  const candidates = [
-    ...newer(chain.decisions, chain.decision_count, action.countBefore),
-    ...newer(chain.strangers, chain.stranger_count, action.strangersBefore),
-  ];
+  if (!action || !PROVISIONAL.has(action.status)) return action;
+  const known = action.countBefore != null && action.strangersBefore != null;
+  const newer = (list, count, before) => list.slice(0, Math.max(0, count - before));
+  const candidates = known
+    ? [
+        ...newer(chain.decisions, chain.decision_count, action.countBefore),
+        ...newer(chain.strangers, chain.stranger_count, action.strangersBefore),
+      ]
+    // The pre-send read failed, so "new since" cannot be counted; fall back to the stamp.
+    : [...chain.decisions, ...chain.strangers].filter((e) => e.timestamp_ms >= action.at - CLOCK_SKEW_MS);
   const hit = candidates.find((e) => sameAttempt(e, action));
   return hit ? { ...action, ...fromRecord(hit), settledBy: "chain" } : action;
 }
 
 // Sends one payment and leaves state.lastAction in a final state no matter how it ends.
-export async function sendAndRecord(state, intent, { send, readLog, predict }) {
+export async function sendAndRecord(state, intent, { send, readLog }) {
   const attempt = { agent: intent.agent, payee: intent.payee, amount: String(intent.amount) };
   let before = null;
   try { before = await readLog(); } catch { /* counts unknown: settle() then matches nothing */ }
@@ -59,8 +74,11 @@ export async function sendAndRecord(state, intent, { send, readLog, predict }) {
     vendor: intent.vendor ?? null,
     text: intent.text ?? null,
     prediction: intent.prediction ?? null,
-    countBefore: before?.decision_count ?? Infinity,
-    strangersBefore: before?.stranger_count ?? Infinity,
+    // null, with countKnown false, when the pre-send read failed: honest in JSON, and settle()
+    // switches to matching on the timestamp.
+    countKnown: before != null,
+    countBefore: before?.decision_count ?? null,
+    strangersBefore: before?.stranger_count ?? null,
     tx: null,
     at: Date.now(),
   });
@@ -139,21 +157,36 @@ export function publicState(state, chain, view) {
 
 // --- instructions ------------------------------------------------------------------------
 
+// Account ids are cut out first: "leash-pay2-1106fcff.testnet" has a 2 and a 1106 in it, and
+// reading either as the amount would send the wrong sum. Then the amount must be a number on
+// its own, not part of a word ("pay1"), and exactly one distinct number must be present: if
+// the text is ambiguous the right move is to ask, not to pick one.
+const NUMBER_RE = /(?<![\w.])(\d+(?:\.\d+)?)(?:\s*(?:usdc|usd|dollars?)\b)?(?!\w|\.\d)/gi;
+
 export function parseInstruction(text, vendors, decimals) {
-  const t = String(text ?? "");
-  const amt = /(\d+(?:\.\d+)?)\s*(?:usdc|usd|dollars?)?/i.exec(t);
-  if (!amt) return { error: "I could not find an amount in that." };
-  let amount;
-  try { amount = parseUnits(amt[1], decimals); } catch (e) { return { error: e.message }; }
-  const lower = t.toLowerCase();
-  const vendor = vendors.find((v) => [v.name, ...(v.aliases ?? [])].some((n) => lower.includes(n.toLowerCase())));
+  const lower = String(text ?? "").toLowerCase();
   const account = ACCOUNT_RE.exec(lower)?.[0];
-  if (vendor && !account) return { payee: vendor.account, amount, vendor: vendor.name };
+  const prose = lower.replace(new RegExp(ACCOUNT_RE.source, "g"), " ");
+  const numbers = [...new Set([...prose.matchAll(NUMBER_RE)].map((m) => m[1]))];
+  if (numbers.length === 0) return { error: "I could not find an amount in that." };
+  if (numbers.length > 1) return { error: `I found more than one amount (${numbers.join(", ")}); say it once.` };
+  let amount;
+  try { amount = parseUnits(numbers[0], decimals); } catch (e) { return { error: e.message }; }
+  const word = (n) => new RegExp(`(?<![\\w-])${n.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`).test(prose);
+  const vendor = vendors.find((v) => [v.name, ...(v.aliases ?? [])].some(word));
   if (account) {
     const known = vendors.find((v) => v.account === account);
     return { payee: account, amount, vendor: known?.name ?? null };
   }
+  if (vendor) return { payee: vendor.account, amount, vendor: vendor.name };
   return { error: "I do not know who to pay: name a vendor I know, or give an account id." };
+}
+
+// The key file signs as the agent account. Anyone who can read it can spend its budget, so a
+// file readable by group or others is something to say out loud before the first send.
+export function keyFileWarning(path, mode) {
+  if ((mode & 0o077) === 0) return null;
+  return `WARNING: ${path} is mode ${(mode & 0o777).toString(8)}, not 600. Anyone who can read it can spend this agent's budget. Run: chmod 600 ${path}`;
 }
 
 // --- the process ---------------------------------------------------------------------------
@@ -163,6 +196,9 @@ function config() {
   const name = (process.env.AGENT_NAME || "").trim();
   const agentAddr = (process.env.AGENT_ACCOUNT || "").trim();
   if (!name || !agentAddr) throw new Error("AGENT_NAME and AGENT_ACCOUNT are required");
+  const keyFile = process.env.AGENT_KEY_FILE || join(homedir(), ".leash-testnet", `akf-${agentAddr.split(".")[0]}.json`);
+  const warn = keyFileWarning(keyFile, statSync(keyFile).mode);
+  if (warn) console.error(`\n!!! ${warn}\n`);
   return {
     name,
     agentAddr,
@@ -171,7 +207,7 @@ function config() {
     wallet: process.env.WALLET || dep.wallet,
     token: process.env.TOKEN || dep.token,
     units: { decimals: Number(process.env.TOKEN_DECIMALS || 6), symbol: process.env.TOKEN_SYMBOL || "USDC" },
-    keyFile: process.env.AGENT_KEY_FILE || join(homedir(), ".leash-testnet", `akf-${agentAddr.split(".")[0]}.json`),
+    keyFile,
     vendors: JSON.parse(readFileSync(join(here, "vendors.json"), "utf8")),
   };
 }

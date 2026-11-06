@@ -1,0 +1,565 @@
+[
+  {
+    "name": "allowed",
+    "rule": {
+      "token": "usdc.testnet",
+      "per_tx_limit": "1000",
+      "period_limit": "10000",
+      "window_start_ms": "0",
+      "window_end_ms": "18446744073709551615",
+      "payees": [
+        "alice.testnet"
+      ],
+      "paused": false
+    },
+    "attempt": {
+      "token": "usdc.testnet",
+      "payee": "alice.testnet",
+      "amount": "100",
+      "spent": "0",
+      "now_ms": "1700000000000",
+      "account_paused": false
+    },
+    "expected_code": null
+  },
+  {
+    "name": "no rule",
+    "rule": null,
+    "attempt": {
+      "token": "usdc.testnet",
+      "payee": "alice.testnet",
+      "amount": "100",
+      "spent": "0",
+      "now_ms": "1700000000000",
+      "account_paused": false
+    },
+    "expected_code": 1
+  },
+  {
+    "name": "account paused",
+    "rule": {
+      "token": "usdc.testnet",
+      "per_tx_limit": "1000",
+      "period_limit": "10000",
+      "window_start_ms": "0",
+      "window_end_ms": "18446744073709551615",
+      "payees": [
+        "alice.testnet"
+      ],
+      "paused": false
+    },
+    "attempt": {
+      "token": "usdc.testnet",
+      "payee": "alice.testnet",
+      "amount": "100",
+      "spent": "0",
+      "now_ms": "1700000000000",
+      "account_paused": true
+    },
+    "expected_code": 2
+  },
+  {
+    "name": "node paused",
+    "rule": {
+      "token": "usdc.testnet",
+      "per_tx_limit": "1000",
+      "period_limit": "10000",
+      "window_start_ms": "0",
+      "window_end_ms": "18446744073709551615",
+      "payees": [
+        "alice.testnet"
+      ],
+      "paused": true
+    },
+    "attempt": {
+      "token": "usdc.testnet",
+      "payee": "alice.testnet",
+      "amount": "100",
+      "spent": "0",
+      "now_ms": "1700000000000",
+      "account_paused": false
+    },
+    "expected_code": 2
+  },
+  {
+    "name": "wrong token",
+    "rule": {
+      "token": "usdc.testnet",
+      "per_tx_limit": "1000",
+      "period_limit": "10000",
+      "window_start_ms": "0",
+      "window_end_ms": "18446744073709551615",
+      "payees": [
+        "alice.testnet"
+      ],
+      "paused": false
+    },
+    "attempt": {
+      "token": "dai.testnet",
+      "payee": "alice.testnet",
+      "amount": "100",
+      "spent": "0",
+      "now_ms": "1700000000000",
+      "account_paused": false
+    },
+    "expected_code": 3
+  },
+  {
+    "name": "payee not listed",
+    "rule": {
+      "token": "usdc.testnet",
+      "per_tx_limit": "1000",
+      "period_limit": "10000",
+      "window_start_ms": "0",
+      "window_end_ms": "18446744073709551615",
+      "payees": [
+        "alice.testnet"
+      ],
+      "paused": false
+    },
+    "attempt": {
+      "token": "usdc.testnet",
+      "payee": "mallory.testnet",
+      "amount": "100",
+      "spent": "0",
+      "now_ms": "1700000000000",
+      "account_paused": false
+    },
+    "expected_code": 4
+  },
+  {
+    "name": "empty allow-list",
+    "rule": {
+      "token": "usdc.testnet",
+      "per_tx_limit": "1000",
+      "period_limit": "10000",
+      "window_start_ms": "0",
+      "window_end_ms": "18446744073709551615",
+      "payees": [],
+      "paused": false
+    },
+    "attempt": {
+      "token": "usdc.testnet",
+      "payee": "alice.testnet",
+      "amount": "100",
+      "spent": "0",
+      "now_ms": "1700000000000",
+      "account_paused": false
+    },
+    "expected_code": 4
+  },
+  {
+    "name": "exactly the per-tx limit",
+    "rule": {
+      "token": "usdc.testnet",
+      "per_tx_limit": "1000",
+      "period_limit": "10000",
+      "window_start_ms": "0",
+      "window_end_ms": "18446744073709551615",
+      "payees": [
+        "alice.testnet"
+      ],
+      "paused": false
+    },
+    "attempt": {
+      "token": "usdc.testnet",
+      "payee": "alice.testnet",
+      "amount": "1000",
+      "spent": "0",
+      "now_ms": "1700000000000",
+      "account_paused": false
+    },
+    "expected_code": null
+  },
+  {
+    "name": "one over the per-tx limit",
+    "rule": {
+      "token": "usdc.testnet",
+      "per_tx_limit": "1000",
+      "period_limit": "10000",
+      "window_start_ms": "0",
+      "window_end_ms": "18446744073709551615",
+      "payees": [
+        "alice.testnet"
+      ],
+      "paused": false
+    },
+    "attempt": {
+      "token": "usdc.testnet",
+      "payee": "alice.testnet",
+      "amount": "1001",
+      "spent": "0",
+      "now_ms": "1700000000000",
+      "account_paused": false
+    },
+    "expected_code": 5
+  },
+  {
+    "name": "zero amount",
+    "rule": {
+      "token": "usdc.testnet",
+      "per_tx_limit": "1000",
+      "period_limit": "10000",
+      "window_start_ms": "0",
+      "window_end_ms": "18446744073709551615",
+      "payees": [
+        "alice.testnet"
+      ],
+      "paused": false
+    },
+    "attempt": {
+      "token": "usdc.testnet",
+      "payee": "alice.testnet",
+      "amount": "0",
+      "spent": "0",
+      "now_ms": "1700000000000",
+      "account_paused": false
+    },
+    "expected_code": null
+  },
+  {
+    "name": "exactly the period limit",
+    "rule": {
+      "token": "usdc.testnet",
+      "per_tx_limit": "1000",
+      "period_limit": "10000",
+      "window_start_ms": "0",
+      "window_end_ms": "18446744073709551615",
+      "payees": [
+        "alice.testnet"
+      ],
+      "paused": false
+    },
+    "attempt": {
+      "token": "usdc.testnet",
+      "payee": "alice.testnet",
+      "amount": "1000",
+      "spent": "9000",
+      "now_ms": "1700000000000",
+      "account_paused": false
+    },
+    "expected_code": null
+  },
+  {
+    "name": "one over the period limit",
+    "rule": {
+      "token": "usdc.testnet",
+      "per_tx_limit": "1000",
+      "period_limit": "10000",
+      "window_start_ms": "0",
+      "window_end_ms": "18446744073709551615",
+      "payees": [
+        "alice.testnet"
+      ],
+      "paused": false
+    },
+    "attempt": {
+      "token": "usdc.testnet",
+      "payee": "alice.testnet",
+      "amount": "1000",
+      "spent": "9001",
+      "now_ms": "1700000000000",
+      "account_paused": false
+    },
+    "expected_code": 6
+  },
+  {
+    "name": "period already spent",
+    "rule": {
+      "token": "usdc.testnet",
+      "per_tx_limit": "1000",
+      "period_limit": "10000",
+      "window_start_ms": "0",
+      "window_end_ms": "18446744073709551615",
+      "payees": [
+        "alice.testnet"
+      ],
+      "paused": false
+    },
+    "attempt": {
+      "token": "usdc.testnet",
+      "payee": "alice.testnet",
+      "amount": "1",
+      "spent": "10000",
+      "now_ms": "1700000000000",
+      "account_paused": false
+    },
+    "expected_code": 6
+  },
+  {
+    "name": "before the window",
+    "rule": {
+      "token": "usdc.testnet",
+      "per_tx_limit": "1000",
+      "period_limit": "10000",
+      "window_start_ms": "1000",
+      "window_end_ms": "2000",
+      "payees": [
+        "alice.testnet"
+      ],
+      "paused": false
+    },
+    "attempt": {
+      "token": "usdc.testnet",
+      "payee": "alice.testnet",
+      "amount": "100",
+      "spent": "0",
+      "now_ms": "999",
+      "account_paused": false
+    },
+    "expected_code": 7
+  },
+  {
+    "name": "window start is inclusive",
+    "rule": {
+      "token": "usdc.testnet",
+      "per_tx_limit": "1000",
+      "period_limit": "10000",
+      "window_start_ms": "1000",
+      "window_end_ms": "2000",
+      "payees": [
+        "alice.testnet"
+      ],
+      "paused": false
+    },
+    "attempt": {
+      "token": "usdc.testnet",
+      "payee": "alice.testnet",
+      "amount": "100",
+      "spent": "0",
+      "now_ms": "1000",
+      "account_paused": false
+    },
+    "expected_code": null
+  },
+  {
+    "name": "window end is inclusive",
+    "rule": {
+      "token": "usdc.testnet",
+      "per_tx_limit": "1000",
+      "period_limit": "10000",
+      "window_start_ms": "1000",
+      "window_end_ms": "2000",
+      "payees": [
+        "alice.testnet"
+      ],
+      "paused": false
+    },
+    "attempt": {
+      "token": "usdc.testnet",
+      "payee": "alice.testnet",
+      "amount": "100",
+      "spent": "0",
+      "now_ms": "2000",
+      "account_paused": false
+    },
+    "expected_code": null
+  },
+  {
+    "name": "after the window",
+    "rule": {
+      "token": "usdc.testnet",
+      "per_tx_limit": "1000",
+      "period_limit": "10000",
+      "window_start_ms": "1000",
+      "window_end_ms": "2000",
+      "payees": [
+        "alice.testnet"
+      ],
+      "paused": false
+    },
+    "attempt": {
+      "token": "usdc.testnet",
+      "payee": "alice.testnet",
+      "amount": "100",
+      "spent": "0",
+      "now_ms": "2001",
+      "account_paused": false
+    },
+    "expected_code": 7
+  },
+  {
+    "name": "amount past 2^53 at the limit",
+    "rule": {
+      "token": "usdc.testnet",
+      "per_tx_limit": "9007199254740993",
+      "period_limit": "18014398509481986",
+      "window_start_ms": "0",
+      "window_end_ms": "18446744073709551615",
+      "payees": [
+        "alice.testnet"
+      ],
+      "paused": false
+    },
+    "attempt": {
+      "token": "usdc.testnet",
+      "payee": "alice.testnet",
+      "amount": "9007199254740993",
+      "spent": "0",
+      "now_ms": "1700000000000",
+      "account_paused": false
+    },
+    "expected_code": null
+  },
+  {
+    "name": "amount past 2^53 one over",
+    "rule": {
+      "token": "usdc.testnet",
+      "per_tx_limit": "9007199254740993",
+      "period_limit": "18014398509481986",
+      "window_start_ms": "0",
+      "window_end_ms": "18446744073709551615",
+      "payees": [
+        "alice.testnet"
+      ],
+      "paused": false
+    },
+    "attempt": {
+      "token": "usdc.testnet",
+      "payee": "alice.testnet",
+      "amount": "9007199254740994",
+      "spent": "0",
+      "now_ms": "1700000000000",
+      "account_paused": false
+    },
+    "expected_code": 5
+  },
+  {
+    "name": "sum overflows u128",
+    "rule": {
+      "token": "usdc.testnet",
+      "per_tx_limit": "340282366920938463463374607431768211455",
+      "period_limit": "340282366920938463463374607431768211455",
+      "window_start_ms": "0",
+      "window_end_ms": "18446744073709551615",
+      "payees": [
+        "alice.testnet"
+      ],
+      "paused": false
+    },
+    "attempt": {
+      "token": "usdc.testnet",
+      "payee": "alice.testnet",
+      "amount": "340282366920938463463374607431768211455",
+      "spent": "1",
+      "now_ms": "1700000000000",
+      "account_paused": false
+    },
+    "expected_code": 6
+  },
+  {
+    "name": "everything wrong",
+    "rule": {
+      "token": "usdc.testnet",
+      "per_tx_limit": "1000",
+      "period_limit": "10000",
+      "window_start_ms": "0",
+      "window_end_ms": "18446744073709551615",
+      "payees": [
+        "alice.testnet"
+      ],
+      "paused": false
+    },
+    "attempt": {
+      "token": "dai.testnet",
+      "payee": "mallory.testnet",
+      "amount": "5000",
+      "spent": "9999",
+      "now_ms": "1700000000000",
+      "account_paused": true
+    },
+    "expected_code": 2
+  },
+  {
+    "name": "token before payee before limits",
+    "rule": {
+      "token": "usdc.testnet",
+      "per_tx_limit": "1000",
+      "period_limit": "10000",
+      "window_start_ms": "0",
+      "window_end_ms": "18446744073709551615",
+      "payees": [
+        "alice.testnet"
+      ],
+      "paused": false
+    },
+    "attempt": {
+      "token": "dai.testnet",
+      "payee": "mallory.testnet",
+      "amount": "5000",
+      "spent": "0",
+      "now_ms": "1700000000000",
+      "account_paused": false
+    },
+    "expected_code": 3
+  },
+  {
+    "name": "payee before limits",
+    "rule": {
+      "token": "usdc.testnet",
+      "per_tx_limit": "1000",
+      "period_limit": "10000",
+      "window_start_ms": "0",
+      "window_end_ms": "18446744073709551615",
+      "payees": [
+        "alice.testnet"
+      ],
+      "paused": false
+    },
+    "attempt": {
+      "token": "usdc.testnet",
+      "payee": "mallory.testnet",
+      "amount": "5000",
+      "spent": "0",
+      "now_ms": "1700000000000",
+      "account_paused": false
+    },
+    "expected_code": 4
+  },
+  {
+    "name": "per-tx before period",
+    "rule": {
+      "token": "usdc.testnet",
+      "per_tx_limit": "1000",
+      "period_limit": "10000",
+      "window_start_ms": "0",
+      "window_end_ms": "18446744073709551615",
+      "payees": [
+        "alice.testnet"
+      ],
+      "paused": false
+    },
+    "attempt": {
+      "token": "usdc.testnet",
+      "payee": "alice.testnet",
+      "amount": "5000",
+      "spent": "9999",
+      "now_ms": "1700000000000",
+      "account_paused": false
+    },
+    "expected_code": 5
+  },
+  {
+    "name": "period before window",
+    "rule": {
+      "token": "usdc.testnet",
+      "per_tx_limit": "1000",
+      "period_limit": "10000",
+      "window_start_ms": "10",
+      "window_end_ms": "20",
+      "payees": [
+        "alice.testnet"
+      ],
+      "paused": false
+    },
+    "attempt": {
+      "token": "usdc.testnet",
+      "payee": "alice.testnet",
+      "amount": "1000",
+      "spent": "9999",
+      "now_ms": "5",
+      "account_paused": false
+    },
+    "expected_code": 6
+  }
+]

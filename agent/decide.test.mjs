@@ -58,3 +58,9 @@ test("formatUnits and parseUnits are exact and keep sub-cent amounts visible", (
   assert.equal(parseUnits("12", 6), 12_000_000n);
   assert.throws(() => parseUnits("1.0000001", 6));
 });
+
+test("the account-wide pause is predicted as code 2, even with a rule that is not paused", () => {
+  const d = decide(view({ accountPaused: true }), intent());
+  assert.equal(d.code, 2);
+  assert.match(d.explain, /wallet is paused/);
+});

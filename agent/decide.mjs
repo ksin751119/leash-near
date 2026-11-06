@@ -47,7 +47,10 @@ export function decide(view, intent) {
   const sym = units.symbol;
 
   if (!rule) return out(view, 1, `${view.node ?? "this agent"} has no budget rule.`);
-  if (rule.paused) return out(view, 2, "the budget is paused.");
+  // Code 2 is the account-wide pause OR the node's own flag (spend.rs CHECKS[0]).
+  if (view.accountPaused || rule.paused) {
+    return out(view, 2, view.accountPaused ? "the whole wallet is paused." : "this budget is paused.");
+  }
   if (rule.token !== intent.token) {
     return out(view, 3, `${intent.token} is not the token this budget is in (${rule.token}).`);
   }

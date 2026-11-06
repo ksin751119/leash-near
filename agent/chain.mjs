@@ -31,10 +31,11 @@ export const readLog = (wallet) => callView(wallet, "decision_log");
 // refusal table, so no sentence is duplicated in JavaScript.
 export async function readView({ wallet, agent, units }) {
   const node = await callView(wallet, "node_for", { agent });
-  const [rule, spent, reasons] = await Promise.all([
+  const [accountPaused, rule, spent, reasons] = await Promise.all([
+    callView(wallet, "is_paused"),
     node ? callView(wallet, "rule_of", { node }) : null,
     node ? callView(wallet, "spent_in_period", { node }) : "0",
     callView(wallet, "refusal_codes"),
   ]);
-  return { node, rule, spent, nowMs: Date.now(), reasons, units };
+  return { node, rule, spent, accountPaused, nowMs: Date.now(), reasons, units };
 }

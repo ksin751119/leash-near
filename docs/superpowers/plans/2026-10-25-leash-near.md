@@ -455,7 +455,7 @@ test("a refusal recorded on-chain is shown as refused, not in-flight", …)  // 
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `node --test agent/`
+Run: `node --test agent/*.test.mjs`
 Expected: FAIL
 
 - [ ] **Step 3: Implement the loop**
@@ -464,7 +464,7 @@ Expected: FAIL
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `node --test agent/`
+Run: `node --test agent/*.test.mjs`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -540,7 +540,7 @@ Each claim followed by the test that proves it, e.g. "the agent key cannot touch
 
 - [ ] **Step 4: Full test run**
 
-Run: `cargo test && node --test agent/ && node --test web/`
+Run: `cargo test && node --test agent/*.test.mjs && node --test web/`
 Expected: all green; record the counts in the README.
 
 - [ ] **Step 5: Commit**
