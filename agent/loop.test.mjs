@@ -183,7 +183,7 @@ test("an account id and no amount is an error, not 2.00 or 1106", () => {
 test("a number inside a word is not an amount, and two different numbers are refused", () => {
   assert.equal(parseInstruction("pay1 3 USDC", vendors, 6).amount, 3_000_000n);
   assert.match(parseInstruction("pay Acme 3 USDC or 4 USDC", vendors, 6).error, /more than one/);
-  assert.equal(parseInstruction("pay Acme 5.", vendors, 6).amount, 5_000_000n);
+  assert.equal(parseInstruction("pay Acme 5.00 USDC.", vendors, 6).amount, 5_000_000n);
 });
 
 test("a vendor alias inside a longer word does not match", () => {
@@ -196,4 +196,43 @@ test("a key file readable by others produces a loud warning, a private one does 
   assert.equal(keyFileWarning("/k.json", 0o100600), null);
   assert.match(keyFileWarning("/k.json", 0o100644), /WARNING.*644.*chmod 600/);
   assert.match(keyFileWarning("/k.json", 0o100660), /WARNING/);
+});
+
+// --- ambiguity is a question, never a guess ---
+
+test("a bare integer is never the amount: vendor shorthands with digits, 2x, no unit", () => {
+  for (const t of ["pay acme2 0.50 USDC", "pay vendor3 5", "pay tier1 5", "send 2x 0.50", "pay Acme 5"]) {
+    const r = parseInstruction(t, vendors, 6);
+    // Either it asks, or (when a real amount and payee are both present) it never used the digit.
+    if (r.amount !== undefined) assert.notEqual(r.amount, 2_000_000n, t);
+    if (t === "pay acme2 0.50 USDC") assert.ok(r.error, "acme2 is not a vendor I know");
+    if (t === "pay Acme 5") assert.match(r.error, /unit or a decimal/);
+  }
+  assert.equal(parseInstruction("pay Acme 0.50 USDC", vendors, 6).amount, 500_000n);
+  assert.equal(parseInstruction("pay Acme $5", vendors, 6).amount, 5_000_000n);
+  assert.equal(parseInstruction("pay Acme 5 usdc", vendors, 6).amount, 5_000_000n);
+});
+
+test("thousands separators, signs and percents are refused, not read as something else", () => {
+  for (const t of ["pay acme 1,000 USDC", "pay acme 1,000.50 USDC", "pay acme -5 USDC", "pay acme +5.00", "pay acme 5%", "pay acme 5.00%"]) {
+    assert.ok(parseInstruction(t, vendors, 6).error, t);
+    assert.equal(parseInstruction(t, vendors, 6).amount, undefined, t);
+  }
+});
+
+test("two candidate payees, or a negation, get a question", () => {
+  for (const t of [
+    "pay acme 5.00 USDC to bob.testnet",
+    "pay 5.00 USDC to alice.testnet not bob.testnet",
+    "pay 5.00 USDC to alice.testnet and bob.testnet",
+    "pay acme 1.00 USDC and inference",
+    "don't pay acme 5.00 USDC",
+    "do not pay acme 5.00 USDC",
+  ]) {
+    const r = parseInstruction(t, vendors, 6);
+    assert.ok(r.error, t);
+    assert.equal(r.payee, undefined, t);
+  }
+  // The same payee named twice (by name and by account) is not a conflict.
+  assert.equal(parseInstruction(`pay acme 5.00 USDC at ${PAY1}`, vendors, 6).payee, PAY1);
 });

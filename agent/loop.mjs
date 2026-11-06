@@ -157,29 +157,54 @@ export function publicState(state, chain, view) {
 
 // --- instructions ------------------------------------------------------------------------
 
-// Account ids are cut out first: "leash-pay2-1106fcff.testnet" has a 2 and a 1106 in it, and
-// reading either as the amount would send the wrong sum. Then the amount must be a number on
-// its own, not part of a word ("pay1"), and exactly one distinct number must be present: if
-// the text is ambiguous the right move is to ask, not to pick one.
-const NUMBER_RE = /(?<![\w.])(\d+(?:\.\d+)?)(?:\s*(?:usdc|usd|dollars?)\b)?(?!\w|\.\d)/gi;
+// The rule for every part of this: when the instruction is ambiguous, ASK. A question on screen
+// is fine; a confidently wrong amount with a green tick is the worst thing this product can do.
+//
+// Account ids are cut out first ("leash-pay2-1106fcff.testnet" has a 2 and a 1106 in it). Then
+// an amount is only a number that SAYS it is one: it has a decimal point ("0.50"), or sits next
+// to a unit ("5 USDC", "$5"). A bare integer is never an amount, so "acme2", "tier1" and "2x"
+// cannot become one. Signed, percent and thousands-separated numbers are refused, not read as
+// something else. Two different amounts, two candidate payees, or a negation all get a question.
+const NUMBER_RE = /(?<![\w.])([-+\u2212]?)(\$?)(\d+(?:[.,]\d+)*)(\s*%)?(?:\s*(usdc|usd|dollars?)\b)?(?!\w)/gi;
+const NEGATION_RE = /\b(?:not|never|don'?t|do not|dont|cancel|stop|instead of)\b/i;
 
 export function parseInstruction(text, vendors, decimals) {
   const lower = String(text ?? "").toLowerCase();
-  const account = ACCOUNT_RE.exec(lower)?.[0];
+  const accounts = [...new Set(lower.match(new RegExp(ACCOUNT_RE.source, "g")) ?? [])];
   const prose = lower.replace(new RegExp(ACCOUNT_RE.source, "g"), " ");
-  const numbers = [...new Set([...prose.matchAll(NUMBER_RE)].map((m) => m[1]))];
-  if (numbers.length === 0) return { error: "I could not find an amount in that." };
-  if (numbers.length > 1) return { error: `I found more than one amount (${numbers.join(", ")}); say it once.` };
-  let amount;
-  try { amount = parseUnits(numbers[0], decimals); } catch (e) { return { error: e.message }; }
-  const word = (n) => new RegExp(`(?<![\\w-])${n.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`).test(prose);
-  const vendor = vendors.find((v) => [v.name, ...(v.aliases ?? [])].some(word));
-  if (account) {
-    const known = vendors.find((v) => v.account === account);
-    return { payee: account, amount, vendor: known?.name ?? null };
+
+  if (NEGATION_RE.test(prose)) {
+    return { error: "That sounds like a \"don't\"; I won't guess. Say what you want paid, positively." };
   }
-  if (vendor) return { payee: vendor.account, amount, vendor: vendor.name };
-  return { error: "I do not know who to pay: name a vendor I know, or give an account id." };
+
+  const amounts = new Set();
+  let sawBareInteger = false;
+  for (const m of prose.matchAll(NUMBER_RE)) {
+    const [, sign, dollar, digits, percent, unit] = m;
+    if (sign || percent) return { error: `I won't read "${m[0].trim()}" as an amount; give a plain positive amount like 5.00 USDC.` };
+    if (digits.includes(",")) return { error: `I won't read "${digits}" as an amount; write it without commas, like 1000.00 USDC.` };
+    if (/^\d+\.\d+$/.test(digits) || unit || dollar) amounts.add(digits);
+    else sawBareInteger = true;
+  }
+  if (amounts.size === 0) {
+    return { error: sawBareInteger
+      ? "I need the unit or a decimal point on the amount, like 5 USDC or 5.00."
+      : "I could not find an amount in that." };
+  }
+  if (amounts.size > 1) return { error: `I found more than one amount (${[...amounts].join(", ")}); say it once.` };
+  let amount;
+  try { amount = parseUnits([...amounts][0], decimals); } catch (e) { return { error: e.message }; }
+
+  const word = (n) => new RegExp(`(?<![\\w-])${n.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`).test(prose);
+  const named = vendors.filter((v) => [v.name, ...(v.aliases ?? [])].some(word));
+  const payees = new Set([...accounts, ...named.map((v) => v.account)]);
+  if (payees.size > 1) {
+    return { error: `I found more than one payee (${[...payees].join(", ")}); name one.` };
+  }
+  if (payees.size === 0) return { error: "I do not know who to pay: name a vendor I know, or give an account id." };
+  const payee = [...payees][0];
+  const known = vendors.find((v) => v.account === payee);
+  return { payee, amount, vendor: known?.name ?? null };
 }
 
 // The key file signs as the agent account. Anyone who can read it can spend its budget, so a
