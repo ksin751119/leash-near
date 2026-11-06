@@ -234,7 +234,7 @@ body { margin:0; background:var(--ground); color:var(--ink); font-family:var(--s
         <div class="ph"><h2>What the chain decided</h2><span class="sub">decision_log(), newest first</span></div>
         <div id="stale" class="banner" hidden></div>
         <div class="ringhead"><h3>Agents with a rule</h3><span class="src" id="agentsCount"></span></div>
-        <div class="legend">Linked rows are payments these two agents sent: click to open the transaction. The others came from another caller or an earlier run; the chain stores no transaction id, so there is nothing to link.</div>
+        <div class="legend">Linked rows are payments these two agents sent: click to open the transaction. The others were not sent in this session (an earlier run, or another caller); the chain stores no transaction id, so there is nothing to link.</div>
         <div id="decisions"><div class="empty">nothing yet</div></div>
         <div class="strangers">
           <div class="ringhead"><h3>Strangers</h3><span class="src" id="strangersCount"></span></div>
@@ -436,7 +436,7 @@ body { margin:0; background:var(--ground); color:var(--ink); font-family:var(--s
     if (r.node == null) l2.append(document.createTextNode(" · "), h("span", "nonode", r.nodeLabel));
     else if (r.ring === "strangers") l2.append(document.createTextNode(` · budget ${r.node}`));
     l2.append(document.createTextNode(" · "));
-    l2.append(r.txUrl ? link(r.txUrl, "view transaction") : h("span", "nolink", r.ring === "strangers" ? "stranger, not ours" : "not ours"));
+    l2.append(r.txUrl ? link(r.txUrl, "view transaction") : h("span", "nolink", r.ring === "strangers" ? "stranger" : "not sent this session"));
     if (!r.txUrl) l2.title = r.noLink;
     return h("div", `rowd ${r.status}`, null, h("div", "who", r.agent.split(".")[0]), mid, h("div", "amt num", `${r.amount}`), l2);
   }

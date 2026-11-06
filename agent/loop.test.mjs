@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { settle, sendAndRecord, publicState, keyFileWarning, resolveUnconfirmed } from "./loop.mjs";
+import { settle, sendAndRecord, publicState, keyFileWarning, resolveUnconfirmed, claimSlot } from "./loop.mjs";
 import { entry, log, view, ALPHA, BETA, PAY1, TOKEN, NODE, UNITS } from "./fixtures.mjs";
 
 const inFlight = (over = {}) => ({
@@ -305,4 +305,78 @@ test("the transaction links are still there after a restart", async () => {
   const restarted = { name: "p", agentAddr: ALPHA, lastAction: null, sent: loadSent(file) };
   const s = publicState(restarted, after, view());
   assert.equal(s.txs[`${ALPHA}|77`], "TXKEEP");
+});
+
+// --- a hash that never landed must not steal a decision's link --------------------------------------
+
+test("a rejected attempt's hash is forgotten, so a later identical payment links to its own transaction", async () => {
+  const state = { name: "p", agentAddr: ALPHA, lastAction: null, sent: [], save() {} };
+  const before = log({ decision_count: 3 });
+  await sendAndRecord(state, pay, {
+    send: async (_i, h) => { h.onSigned("TXDEAD"); throw new SendError("rejected", "invalid signature", "TXDEAD"); },
+    readLog: async () => before,
+  });
+  assert.deepEqual(state.sent.map((e) => e.tx), []);
+  const landed = log({ decisions: [entry({ amount: "5000000", timestamp_ms: 55 })], decision_count: 4 });
+  await sendAndRecord(state, pay, { send: async (_i, h) => { h.onSigned("TXLIVE"); return { txHash: "TXLIVE", outcome: { status: "refused", code: 5, reason: "x" } }; }, readLog: async () => before });
+  assert.deepEqual(matchTxs(state.sent, landed), { [`${ALPHA}|55`]: "TXLIVE" });
+});
+
+test("a failure that provably moved nothing is forgotten; one that moved money, or may have, is kept", async () => {
+  for (const [moved, kept] of [[false, false], [true, true], [null, true]]) {
+    const state = { name: "p", agentAddr: ALPHA, lastAction: null, sent: [], save() {} };
+    await sendAndRecord(state, pay, {
+      send: async (_i, h) => { h.onSigned("TXF"); throw new SendError("chain-failed", "failed", "TXF", moved); },
+      readLog: async () => log({ decision_count: 3 }),
+    });
+    assert.equal(state.sent.length, kept ? 1 : 0, `moved=${moved}`);
+    assert.equal(state.lastAction.moved, moved);
+  }
+});
+
+test("a lookup that finds a rolled-back transaction forgets its hash too", async () => {
+  const state = { lastAction: inFlight({ status: "unknown", errorKind: "unconfirmed", tx: "TXU" }), sent: [{ tx: "TXU", agent: ALPHA, payee: PAY1, amount: "5000000", at: 1 }], save() {} };
+  const failed = { final_execution_status: "FINAL", status: { Failure: {} }, receipts_outcome: [{ outcome: { executor_id: "w.testnet", status: { Failure: {} } } }] };
+  await resolveUnconfirmed(state, "TXU", { ctx: { wallet: "w.testnet", token: TOKEN }, lookup: async () => ({ state: "found", result: failed }), sleep: async () => {} });
+  assert.equal(state.lastAction.moved, false);
+  assert.equal(state.sent.length, 0);
+});
+
+test("resolveUnconfirmed keeps waiting while the lookup is pending", async () => {
+  const state = { lastAction: inFlight({ status: "unknown", errorKind: "unconfirmed", tx: "TXU" }) };
+  const replies = [{ state: "pending" }, { state: "pending" }];
+  let i = 0;
+  const done = await resolveUnconfirmed(state, "TXU", { lookup: async () => replies[i++] ?? { state: "pending" }, tries: 2, sleep: async () => {} });
+  assert.equal(done, false);
+  assert.equal(state.lastAction.status, "unknown");
+});
+
+// --- two instructions in flight ---------------------------------------------------------------------
+
+test("a second instruction keeps the card when the first finishes later", async () => {
+  const state = { name: "p", agentAddr: ALPHA, lastAction: null, sent: [], save() {} };
+  let finishFirst;
+  const first = sendAndRecord(state, { ...pay, understood: "FIRST" }, {
+    send: () => new Promise((r) => { finishFirst = () => r({ txHash: "T1", outcome: { status: "allowed" } }); }),
+    readLog: async () => log({ decision_count: 3 }),
+  });
+  await new Promise((r) => setTimeout(r, 1));
+  const second = sendAndRecord(state, { ...pay, understood: "SECOND" }, { send: () => new Promise(() => {}), readLog: async () => log({ decision_count: 3 }) });
+  await new Promise((r) => setTimeout(r, 1));
+  assert.equal(state.lastAction.understood, "SECOND");
+  finishFirst();
+  const r1 = await first;
+  assert.equal(r1.status, "allowed");                       // the first caller still gets its own result
+  assert.equal(state.lastAction.understood, "SECOND");      // and the card still shows the second instruction
+  assert.equal(state.lastAction.status, "in-flight");
+  void second;
+});
+
+test("a second instruction is turned away while the first is still sending", () => {
+  const state = {};
+  const release = claimSlot(state);
+  assert.ok(release);
+  assert.equal(claimSlot(state), null);
+  release();
+  assert.ok(claimSlot(state));
 });

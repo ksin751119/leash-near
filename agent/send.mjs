@@ -78,7 +78,34 @@ export function signTransaction(txBytes, seed) {
 }
 
 export class SendError extends Error {
-  constructor(kind, message, txHash = null) { super(message); this.kind = kind; this.txHash = txHash; }
+  // `moved` is only set for chain-failed: true, false, or null when the receipts do not say.
+  constructor(kind, message, txHash = null, moved = null) { super(message); this.kind = kind; this.txHash = txHash; this.moved = moved; }
+}
+
+// A transaction is only finished when every receipt has run. send_tx and tx can answer earlier
+// than the wait_until asked for (NONE, INCLUDED, INCLUDED_FINAL: the transaction is in a block but
+// its receipts may still be running), and reading a verdict off that would be reading half of it.
+const COMPLETE = new Set(["EXECUTED_OPTIMISTIC", "EXECUTED", "FINAL"]);
+export const isComplete = (result) => result?.final_execution_status === undefined || COMPLETE.has(result.final_execution_status);
+
+// NEAR rolls back per RECEIPT, not per transaction. spend writes its decision and dispatches
+// ft_transfer; on_transfer runs in a later receipt. If that callback runs out of gas after the
+// transfer went through, the transaction-level status is Failure while the money HAS moved and the
+// log holds Allowed. So a failed transaction says nothing about money until the receipts are read:
+//   spend's own receipt failed          -> rolled back, nothing recorded, nothing moved   (false)
+//   token receipt ran and succeeded     -> the transfer happened, a later step failed     (true)
+//   token receipt failed                -> the transfer did not happen                    (false)
+//   anything else                       -> the receipts do not say                        (null)
+export function classifyFailure(result, { wallet, token } = {}) {
+  const outs = (result?.receipts_outcome ?? []).map((r) => r.outcome).filter(Boolean);
+  const failed = (o) => o.status && typeof o.status === "object" && "Failure" in o.status;
+  const ok = (o) => o.status && typeof o.status === "object" && ("SuccessValue" in o.status || "SuccessReceiptId" in o.status);
+  const spend = outs.find((o) => o.executor_id === wallet);
+  if (spend && failed(spend)) return { moved: false, why: "spend itself failed and was rolled back" };
+  const transfer = outs.find((o) => o.executor_id === token);
+  if (transfer && ok(transfer)) return { moved: true, why: "the token transfer succeeded; a later step (the contract's callback) failed" };
+  if (transfer && failed(transfer)) return { moved: false, why: "the token transfer failed" };
+  return { moved: null, why: "the receipts do not say whether the transfer happened" };
 }
 
 export function readKeyFile(path) {
@@ -105,16 +132,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export async function lookupTx({ hash, agent, rpcOpts = {} }) {
   try {
     const r = await rpc("tx", { tx_hash: hash, sender_account_id: agent, wait_until: "FINAL" }, rpcOpts);
-    if (r.result) return { state: "found", result: r.result };
+    if (r.result) return isComplete(r.result) ? { state: "found", result: r.result } : { state: "pending" };
     return { state: r.error?.cause?.name === "UNKNOWN_TRANSACTION" ? "unknown" : "unreachable" };
   } catch { return { state: "unreachable" }; }
 }
 
 // A finished transaction as a lastAction patch: the contract's own outcome, or a chain failure.
-export function describeResult(result) {
+export function describeResult(result, ctx = {}) {
   const status = result?.status ?? {};
   if (status.Failure) {
-    return { status: "error", errorKind: "chain-failed", reason: `the chain ran the transaction and it failed: ${JSON.stringify(status.Failure).slice(0, 220)}` };
+    const c = classifyFailure(result, ctx);
+    return { status: "error", errorKind: "chain-failed", moved: c.moved, reason: `${c.why}: ${JSON.stringify(status.Failure).slice(0, 200)}` };
   }
   const o = outcomeOf(status);
   if (o) return { status: o.status, code: o.code ?? null, reason: o.reason ?? null, errorKind: null };
@@ -160,7 +188,7 @@ export async function sendSpend({ wallet, agent, keyFile, token, payee, amount, 
   let result = null, broadcastError = null;
   try {
     const r = await rpc("send_tx", { signed_tx_base64: signedBase64, wait_until: "FINAL" }, { ...rpcOpts, timeoutMs: 45_000 });
-    if (r.result) result = r.result; else broadcastError = r.error ?? null;
+    if (r.result && isComplete(r.result)) result = r.result; else if (!r.result) broadcastError = r.error ?? null;
   } catch (e) {
     if (!(e instanceof AllEndpointsFailed)) throw e;
   }
@@ -179,7 +207,8 @@ export async function sendSpend({ wallet, agent, keyFile, token, payee, amount, 
 
   // 3. Finished. A Failure here ran and rolled back; a SuccessValue may still be a refusal.
   if (result.status?.Failure) {
-    throw new SendError("chain-failed", `the chain ran the transaction and it failed: ${JSON.stringify(result.status.Failure).slice(0, 220)}`, txHash);
+    const c = classifyFailure(result, { wallet, token });
+    throw new SendError("chain-failed", `${c.why}: ${JSON.stringify(result.status.Failure).slice(0, 200)}`, txHash, c.moved);
   }
   return { txHash: result.transaction_outcome?.id ?? txHash, outcome: outcomeOf(result.status ?? {}) };
 }

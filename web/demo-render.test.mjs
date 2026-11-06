@@ -332,11 +332,32 @@ test("a send that never reached the chain says so, and that nothing moved", () =
   assert.match(a.label, /chain/i);
 });
 
-test("a transaction the chain ran and failed is distinguished from a refusal", () => {
-  const a = renderAction({ status: "error", errorKind: "chain-failed", reason: "Exceeded the prepaid gas", understood: "u" }, REASONS);
+// NEAR rolls back per receipt: a failed transaction does not say money did not move.
+test("a failure whose receipts show nothing moved says rolled back", () => {
+  const a = renderAction({ status: "error", errorKind: "chain-failed", moved: false, reason: "spend itself failed", understood: "u" }, REASONS);
   assert.match(a.label, /FAILED ON CHAIN/);
+  assert.equal(a.moved, false);
   assert.notEqual(a.tone, "refused");
-  assert.match(a.note, /rolled back|no record/i);
+  assert.match(a.note, /before any money moved/);
+});
+
+test("a failure after the transfer succeeded says the money DID move, and never says it did not", () => {
+  const a = renderAction({ status: "error", errorKind: "chain-failed", moved: true, tx: "T", reason: "callback ran out of gas", understood: "u" }, REASONS);
+  assert.equal(a.moved, true);
+  assert.match(a.label, /PAID/);
+  assert.match(a.note, /DID move/);
+  assert.doesNotMatch(`${a.label} ${a.note}`, /no money moved|rolled back/i);
+  assert.ok(a.txUrl);
+});
+
+test("a failure the receipts cannot explain claims neither, and points at the receipts", () => {
+  for (const moved of [null, undefined]) {
+    const a = renderAction({ status: "error", errorKind: "chain-failed", moved, tx: "T", understood: "u" }, REASONS);
+    assert.equal(a.moved, null);
+    assert.match(a.label, /check the receipts/i);
+    assert.doesNotMatch(`${a.label} ${a.note}`, /no money moved|rolled back|before any money/i);
+    assert.match(a.note, /does not say whether the money moved/);
+  }
 });
 
 test("a transaction refused before it ran is rejected, not refused by the contract", () => {

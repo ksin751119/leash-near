@@ -98,12 +98,22 @@ function remember(state, entry) {
   state.save?.();
 }
 
+function forget(state, tx) {
+  state.sent = (state.sent ?? []).filter((e) => e.tx !== tx);
+  state.save?.();
+}
+
 // Sends one payment and leaves state.lastAction in a final state no matter how it ends.
 export async function sendAndRecord(state, intent, { send, readLog }) {
   const attempt = { agent: intent.agent, payee: intent.payee, amount: String(intent.amount) };
   let before = null;
   try { before = await readLog(); } catch { /* counts unknown: settle() then matches nothing */ }
+  // Each instruction gets a sequence number. Only the latest may write the card: an earlier send
+  // finishing late must not replace a newer instruction on screen.
+  const seq = (state.seq = (state.seq ?? 0) + 1);
+  const mine = () => state.lastAction?.seq === seq;
   const action = (state.lastAction = {
+    seq,
     status: "in-flight",
     ...attempt,
     token: intent.token,
@@ -131,18 +141,27 @@ export async function sendAndRecord(state, intent, { send, readLog }) {
     action.tx = sent.txHash ?? action.tx;
     // spend's return value, from this transaction's own final result, is the chain speaking about
     // exactly this payment.
-    state.lastAction = sent.outcome?.status
+    const final = sent.outcome?.status
       ? { ...action, status: sent.outcome.status, code: sent.outcome.code ?? null, reason: sent.outcome.reason ?? null, settledBy: "transaction" }
       : { ...action, status: "unknown", errorKind: "unconfirmed", reason: "sent, but its result could not be read" };
+    if (mine()) state.lastAction = final;
     if (action.tx) remember(state, { ...attempt, tx: action.tx, at: action.at, countBefore: action.countBefore, strangersBefore: action.strangersBefore });
+    return final;
   } catch (err) {
     // SendError names how it ended (send.mjs); anything else is an unexpected failure of ours,
     // final and unnamed. "unconfirmed" is the one ending where the chain may still have the
     // payment; resolveUnconfirmed keeps asking for that exact hash.
     const kind = err?.kind ?? null;
     const status = kind === "unconfirmed" ? "unknown" : "error";
-    state.lastAction = { ...action, status, errorKind: kind, tx: err?.txHash ?? action.tx, reason: String(err.message ?? err).slice(0, 300) };
-    if (state.lastAction.tx) remember(state, { ...attempt, tx: state.lastAction.tx, at: action.at, countBefore: action.countBefore, strangersBefore: action.strangersBefore });
+    const tx = err?.txHash ?? action.tx;
+    const failed = { ...action, status, errorKind: kind, moved: err?.moved ?? null, tx, reason: String(err.message ?? err).slice(0, 300) };
+    if (mine()) state.lastAction = failed;
+    // A hash that never landed must not stay in the record: a later identical payment that did land
+    // would be matched to it, and the explorer link would open a transaction that did not make that
+    // decision. Only endings that prove it never ran are forgotten; an unconfirmed one might land.
+    if (tx && (kind === "rejected" || (kind === "chain-failed" && err.moved === false))) forget(state, tx);
+    else if (tx) remember(state, { ...attempt, tx, at: action.at, countBefore: action.countBefore, strangersBefore: action.strangersBefore });
+    return failed;
   }
   return state.lastAction;
 }
@@ -150,14 +169,15 @@ export async function sendAndRecord(state, intent, { send, readLog }) {
 // An unconfirmed send is resolved by asking the chain about its exact hash, never by guessing from
 // the log. `lookup(hash)` is send.mjs's lookupTx. Stops as soon as the action on screen is no
 // longer this one (a new instruction replaced it) or after `tries` rounds.
-export async function resolveUnconfirmed(state, hash, { lookup, tries = 60, waitMs = 5_000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
+export async function resolveUnconfirmed(state, hash, { lookup, ctx = {}, tries = 60, waitMs = 5_000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
   for (let i = 0; i < tries; i++) {
     const a = state.lastAction;
     if (!a || a.tx !== hash || a.status !== "unknown") return false;
     const r = await lookup(hash).catch(() => ({ state: "unreachable" }));
     if (r.state === "found") {
-      const d = describeResult(r.result);
+      const d = describeResult(r.result, ctx);
       if (state.lastAction?.tx === hash) state.lastAction = { ...state.lastAction, ...d, settledBy: "transaction-lookup" };
+      if (d.errorKind === "chain-failed" && d.moved === false) forget(state, hash);
       return true;
     }
     await sleep(waitMs);
@@ -236,6 +256,17 @@ export function publicState(state, chain, view) {
 // --- instructions ------------------------------------------------------------------------
 
 export { parseInstruction };
+
+// One instruction at a time per agent. Two sends from the same key would both take the same nonce,
+// and the second would be refused by the network for a reason that has nothing to do with the
+// payment; and the log-count window used to recognise an in-flight payment's decision would
+// include the first payment's decision, which could be mistaken for the second's. So a second
+// instruction typed before the first settles is answered with "busy" instead of being started.
+export function claimSlot(state) {
+  if (state.busy) return null;
+  state.busy = true;
+  return () => { state.busy = false; };
+}
 
 // The key file signs as the agent account. Anyone who can read it can spend its budget, so a
 // file readable by group or others is something to say out loud before the first send.
@@ -318,6 +349,9 @@ export function start(cfg = config()) {
       if (req.method === "POST" && req.url === "/instruct") {
         let text;
         try { text = JSON.parse(await readBody(req)).text; } catch { return json(res, 400, { error: "send JSON: {\"text\": \"...\"}" }); }
+        const release = claimSlot(state);
+        if (!release) return json(res, 409, { error: "still sending the previous payment; wait for its result, then ask again" });
+        try {
         const parsed = parseInstruction(text, cfg.vendors, cfg.units.decimals, { symbol: cfg.units.symbol });
         if (parsed.error) return json(res, 422, { error: parsed.error });
         const intent = { agent: cfg.agentAddr, token: cfg.token, payee: parsed.payee, amount: parsed.amount, vendor: parsed.vendor, understood: parsed.understood, text };
@@ -326,8 +360,9 @@ export function start(cfg = config()) {
         // the thing worth recording.
         const done = await sendAndRecord(state, intent, { send, readLog: readLogFresh });
         readView({ fresh: true }).catch(() => {}); // the budget just moved; refresh what /state serves
-        if (done.status === "unknown" && done.tx) resolveUnconfirmed(state, done.tx, { lookup: (h) => lookupTx({ hash: h, agent: cfg.agentAddr }) });
+        if (done.status === "unknown" && done.tx) resolveUnconfirmed(state, done.tx, { ctx: { wallet: cfg.wallet, token: cfg.token }, lookup: (h) => lookupTx({ hash: h, agent: cfg.agentAddr }) });
         return json(res, 200, { prediction: intent.prediction, lastAction: done });
+        } finally { release(); }
       }
       json(res, 404, { error: "not found" });
     } catch (err) {

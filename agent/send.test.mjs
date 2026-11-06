@@ -4,7 +4,7 @@ import { createHash, verify, generateKeyPairSync } from "node:crypto";
 import { writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { b58decode, b58encode, encodeTransaction, signTransaction, sendSpend, SendError, outcomeOf } from "./send.mjs";
+import { b58decode, b58encode, encodeTransaction, signTransaction, sendSpend, SendError, outcomeOf, classifyFailure, describeResult, lookupTx } from "./send.mjs";
 
 test("base58 round-trips, including leading zero bytes", () => {
   const b = Buffer.from([0, 0, 1, 2, 255, 254, 3]);
@@ -163,4 +163,57 @@ test("broadcast limited and the chain then unreachable is unconfirmed, never not
   net({ ...prep, send_tx: limited, tx: limited });
   const e = await rejects(sendSpend(args(keyFile())), "unconfirmed");
   assert.match(e.message, /may still land/);
+});
+
+// --- NEAR rolls back per receipt, not per transaction ---------------------------------------------
+
+const W = "w.testnet", TOK = "t.testnet";
+const receipt = (executor, status) => ({ outcome: { executor_id: executor, status, logs: [] } });
+const OK = { SuccessValue: "" };
+const BAD = { Failure: { ActionError: { kind: "FunctionCallError" } } };
+const failedTx = (receipts) => ({ final_execution_status: "FINAL", status: { Failure: { ActionError: {} } }, transaction_outcome: { id: "TXID" }, receipts_outcome: receipts });
+
+test("classifyFailure reads the receipts: only a spend or transfer failure supports 'nothing moved'", () => {
+  const ctx = { wallet: W, token: TOK };
+  assert.equal(classifyFailure(failedTx([receipt(W, BAD)]), ctx).moved, false);                       // spend itself failed
+  assert.equal(classifyFailure(failedTx([receipt(W, OK), receipt(TOK, BAD)]), ctx).moved, false);    // transfer failed
+  assert.equal(classifyFailure(failedTx([receipt(W, OK), receipt(TOK, OK), receipt(W, BAD)]), ctx).moved, true); // callback failed AFTER the transfer
+  assert.equal(classifyFailure(failedTx([receipt(W, OK)]), ctx).moved, null);                         // receipts do not say
+  assert.equal(classifyFailure({ status: { Failure: {} } }, ctx).moved, null);                        // no receipts at all
+});
+
+test("a late-receipt failure is reported as money moved, not as rolled back", async () => {
+  net({ ...prep, send_tx: () => ok(failedTx([receipt(W, OK), receipt(TOK, OK), receipt(W, BAD)])) });
+  const e = await rejects(sendSpend({ ...args(keyFile()), wallet: W, token: TOK }), "chain-failed");
+  assert.equal(e.moved, true);
+  assert.doesNotMatch(e.message, /rolled back/);
+});
+
+test("an early failure whose receipts do not say is moved: null, never false", async () => {
+  net({ ...prep, send_tx: () => ok(failedTx([])) });
+  const e = await rejects(sendSpend({ ...args(keyFile()), wallet: W, token: TOK }), "chain-failed");
+  assert.equal(e.moved, null);
+});
+
+test("describeResult carries moved through for a failure found later by lookup", () => {
+  assert.equal(describeResult(failedTx([receipt(W, OK), receipt(TOK, OK), receipt(W, BAD)]), { wallet: W, token: TOK }).moved, true);
+});
+
+// --- a transaction is finished only when its receipts have run -------------------------------------
+
+test("a lookup answer that is only INCLUDED is pending, not a verdict", async () => {
+  net({ tx: () => ok({ final_execution_status: "INCLUDED", status: { SuccessValue: "" } }) });
+  assert.equal((await lookupTx({ hash: "H", agent: "a.testnet" })).state, "pending");
+  net({ tx: () => ok({ final_execution_status: "FINAL", status: { SuccessValue: "" } }) });
+  assert.equal((await lookupTx({ hash: "H", agent: "a.testnet" })).state, "found");
+});
+
+test("a broadcast answer that is not final yet is not read as the outcome: the lookup is used", async () => {
+  const v = Buffer.from('{"status":"refused","code":4,"reason":"r"}').toString("base64");
+  net({
+    ...prep,
+    send_tx: () => ok({ final_execution_status: "INCLUDED", status: { SuccessValue: Buffer.from('{"status":"allowed"}').toString("base64") } }),
+    tx: () => ok({ final_execution_status: "FINAL", status: { SuccessValue: v }, transaction_outcome: { id: "TXID" } }),
+  });
+  assert.equal((await sendSpend(args(keyFile()))).outcome.code, 4);
 });

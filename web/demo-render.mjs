@@ -103,8 +103,19 @@ export function renderAction(a, reasons) {
           note: "The network refused the transaction itself, before the contract saw it. No money moved. This is not the contract refusing a payment." };
       }
       if (a.status === "error" && kind === "chain-failed") {
-        return { ...base, tone: "failed", label: "FAILED ON CHAIN · rolled back", moved: false, reason: a.reason ?? null,
-          note: "The transaction ran and failed, so it was rolled back and the contract recorded no decision. No money moved. This is not a refusal." };
+        // NEAR rolls back per receipt, not per transaction, so a failed transaction does not by
+        // itself say whether money moved. The agent read the receipts (`moved`); say only that.
+        const open = a.tx ? "Open the transaction and read its receipts." : null;
+        if (a.moved === false) {
+          return { ...base, tone: "failed", label: "FAILED ON CHAIN · rolled back", moved: false, reason: a.reason ?? null, txNote: null,
+            note: "The receipts show the failure came before any money moved, and the contract recorded no decision. This is not a refusal." };
+        }
+        if (a.moved === true) {
+          return { ...base, tone: "failed", label: "PAID · a later step failed", moved: true, reason: a.reason ?? null, txNote: open,
+            note: "The token transfer succeeded, so the money DID move. A later step failed, which is why the transaction shows as failed. The contract's log should show this payment as ALLOWED. Check the transfer receipt before doing anything again." };
+        }
+        return { ...base, tone: "failed", label: "FAILED ON CHAIN · check the receipts", moved: null, reason: a.reason ?? null, txNote: open,
+          note: "The transaction failed on chain. NEAR rolls back per receipt, not per transaction, so this alone does not say whether the money moved. Check the transfer receipt before trying again." };
       }
       if (a.status === "unknown" && kind === "unconfirmed") {
         return { ...base, unresolved: true, tone: "unresolved", label: "SENT · NOT CONFIRMED", reason: a.reason ?? null,
@@ -148,7 +159,7 @@ function renderRow(d, ring, reasons, nowSec, txs) {
     txUrl: tx ? txUrl(tx) : null,
     noLink: tx ? null : ring === "strangers"
       ? "no transaction link: a stranger's call, not sent by these agents"
-      : "no transaction link: not sent by a running agent (older, or from another process)",
+      : "no transaction link: not sent in this session (an earlier run, or another process)",
   };
 }
 
