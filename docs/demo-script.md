@@ -153,12 +153,18 @@ money", and if asked about the rest, say plainly that it can freeze it.
 
 What the scripts cover and what they do not. Names below are the ones in `deployments/testnet.json`.
 
-1. Create the accounts (the faucet gives each 10 NEAR): admin, wallet, budget node, token, and two
-   payees. The two agents are sub-accounts of the budget node, created by it
-   (`alpha.<budget-node>`, `beta.<budget-node>`). The admin must differ from the wallet.
-2. Build and deploy: `scripts/build-contract.sh test-token` and deploy it to the token account with
-   `new {owner_id, total_supply, decimals: 6}`, then `storage_deposit` for the wallet and every payee
-   and `ft_transfer` the funding amount to the wallet. Then `scripts/deploy.sh <wallet> <admin> <token> testnet`.
+1. Create the accounts: admin, wallet, budget node, token, and two payees, each from the faucet
+   (`near account create-account sponsor-by-faucet-service <id> autogenerate-new-keypair
+   save-to-keychain network-config testnet create`, 10 NEAR each). The two agents are sub-accounts of
+   the budget node, created by it with `fund-myself` (`alpha.<budget-node>`, `beta.<budget-node>`).
+   The admin must differ from the wallet. Two things bit the rehearsal: the faucet answers
+   `429 Too Many Requests` after a handful of accounts in a minute (create them one at a time, the
+   wallet first, and retry later rather than in a loop), and the wallet must be a faucet account
+   with its own 10 NEAR, because the contract's 707 KB wasm needs about 7.1 NEAR of storage. A
+   sub-account funded from the admin's leftovers cannot hold it.
+2. Build and deploy (`. "$HOME/.cargo/env"` first; `deploy.sh` calls cargo): `scripts/build-contract.sh test-token` and deploy it to the token account with
+   `new {owner_id, total_supply, decimals: 6}`, then `storage_deposit` (0.00125 NEAR) for the wallet and every payee
+   and `ft_transfer` the funding amount to the wallet (attach `1 yoctoNEAR`). Then `scripts/deploy.sh <wallet> <admin> <token> testnet`.
 3. Register at least two credentials with `scripts/register-credential.sh testnet <credential.json>`
    (the JSON `tools/capture-assertion.html` saves after step 1 works as it is). **The first one is
    the real device, and it is the bootstrap**: the admin registers it alone, because nothing exists
@@ -168,12 +174,32 @@ What the scripts cover and what they do not. Names below are the ones in `deploy
    cannot add a credential.** Removal is not gated, so **if every credential is lost the funds are
    stuck for good** and nobody can add a replacement.
 4. Give each agent its key: the agent generates its keypair and hands over only the public key.
-   `scripts/grant-agent-key.sh <wallet> <agent-account> <ed25519:public-key> testnet`. The agent's
-   secret goes in `~/.leash-testnet/akf-<name>.json`, mode 600.
+   `node tools/agent-keygen.mjs ~/.leash-testnet/akf-<name>.json` writes the key file (mode 600) and
+   prints only the public key. Then `scripts/grant-agent-key.sh <wallet> <agent-account> <ed25519:public-key> testnet`. The agent's
+   secret stays in `~/.leash-testnet/akf-<name>.json`, which `agent/loop.mjs` reads by default.
 5. Freeze the wallet: `scripts/freeze.sh <wallet> testnet --yes-i-mean-it`. Irreversible.
 6. Record the accounts in `deployments/testnet.json` (including `funded_wallet_balance`, the base
-   units you funded the wallet with, and `credentials`: `[{"id": ..., "kind": "DEVICE ..." or "SOFTWARE ..."}]` for every registered credential for every registered credential; preflight needs the labels, but takes the registration order from the chain and requires the real device to be sequence 0, because the first credential is the only one the admin key can add alone) and `agent/vendors.json`. The tests read both files, so nothing else needs editing.
+   units you funded the wallet with, and `credentials`: `[{"id": ..., "kind": "DEVICE ..." or "SOFTWARE ..."}]` for every registered credential; preflight needs the labels, but takes the registration order from the chain and requires the real device to be sequence 0, because the first credential is the only one the admin key can add alone) and the two payee accounts in `agent/vendors.json`. The tests read both files, so nothing else needs
+   editing (`agent/intents.json` is an unused sample with the admin account in it; update it for
+   tidiness).
 7. Run the test suites, then the steps under "Before you record".
 
 The first rule for the budget node is applied by `reset-demo.sh`, not by hand, so the rule
 preflight checks and the rule that is applied are the same file.
+
+## Rehearsing without a phone
+
+Every script that wants a face scan prints `challenge: <base64>` and the path it will read the
+assertion from, then polls for that file. A person makes the file with `tools/capture-assertion.html`;
+`tools/drive-software-credential.sh <key.jwk> <logfile>` makes the same file with a software
+credential, so the script cannot tell them apart and the path is the same. Run the script with its
+output in a file and the driver beside it:
+
+```bash
+L=$(mktemp); tools/drive-software-credential.sh ~/.leash-testnet/cred1.jwk "$L" 60 &
+CREDENTIAL_ID=<id> scripts/reset-demo.sh testnet > "$L" 2>&1
+```
+
+(Pipe through `tee`, not `grep`, if you want to watch: a buffered pipe hides the challenge from the driver.)
+A credential made this way is labelled SOFTWARE in `deployments/testnet.json`, and that label is what
+makes the last preflight check fail, which is the point of it.

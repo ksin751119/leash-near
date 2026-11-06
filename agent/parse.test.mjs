@@ -174,7 +174,9 @@ const ACCEPT = new Map([
 ]);
 
 test("the reviewer's attack batch: only the listed strings parse, to exactly the listed payee and amount", () => {
-  const attacks = JSON.parse(readFileSync(new URL("./parse-attacks.json", import.meta.url), "utf8"));
+  // {pay1} and {pay2} stand for the payee accounts of this deployment, so a new one needs no edit here.
+  const attacks = JSON.parse(readFileSync(new URL("./parse-attacks.json", import.meta.url), "utf8"))
+    .map((s) => s.replaceAll("{pay1}", P1).replaceAll("{pay2}", P2));
   assert.ok(attacks.length >= 150);
   const seen = new Set();
   for (const input of attacks) {

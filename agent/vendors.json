@@ -1,4 +1,21 @@
 [
-  { "id": "pay1", "name": "Acme Studio", "aliases": ["acme", "pay1"], "account": "leash-pay1-1106fcff.testnet" },
-  { "id": "pay2", "name": "Inference API", "aliases": ["inference", "api", "pay2"], "account": "leash-pay2-1106fcff.testnet" }
+  {
+    "id": "pay1",
+    "name": "Acme Studio",
+    "aliases": [
+      "acme",
+      "pay1"
+    ],
+    "account": "pay1.leash-adm-044127.testnet"
+  },
+  {
+    "id": "pay2",
+    "name": "Inference API",
+    "aliases": [
+      "inference",
+      "api",
+      "pay2"
+    ],
+    "account": "leash-pay2-044127.testnet"
+  }
 ]

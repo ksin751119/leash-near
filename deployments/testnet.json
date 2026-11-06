@@ -1,22 +1,27 @@
 {
   "network": "testnet",
-  "admin": "leash-adm-1106fcff.testnet",
-  "wallet": "leash-wal-1106fcff.testnet",
-  "token": "leash-tok-1106fcff.testnet",
-  "budget_node": "leash-bud-1106fcff.testnet",
+  "admin": "leash-adm-044127.testnet",
+  "wallet": "wal.leash-adm-044127.testnet",
+  "token": "leash-tok-044127.testnet",
+  "budget_node": "leash-bud-044127.testnet",
   "payees": [
-    "leash-pay1-1106fcff.testnet",
-    "leash-pay2-1106fcff.testnet"
+    "pay1.leash-adm-044127.testnet",
+    "leash-pay2-044127.testnet"
   ],
   "agents": {
-    "alpha.leash-bud-1106fcff.testnet": "ed25519:2PR2Ggg7dsD4biYJiw7DbbNBxfdr7ixjVMUkERbSBVGG",
-    "beta.leash-bud-1106fcff.testnet": "ed25519:8uoZovgMvo3668S3Jx21zto3RAdhGvsEMkZWi2MVJZAo"
+    "alpha.leash-bud-044127.testnet": "ed25519:3PLPRh6YDfZBY8sXkeVtvoEjvTKA61f7JVhacEBTrgc2",
+    "beta.leash-bud-044127.testnet": "ed25519:2uFNFkJLfKWhwzWSsq5c9bdV5oQuPNfJcGu3iiQkjeCG"
   },
-  "credential": {
-    "id": "tBVgXn9YQbpq4NMJU8C5pQ==",
-    "pubkey_sec1": "BNXZCm8oz0rvAb5dKRNCvG9/Ok2wewJ0s2PQHO7DluI9qx/1OIGo5NiuUZOZHVdEAcmefOYKm0g0jNe9Efce1+8=",
-    "kind": "SOFTWARE P-256, shakedown only"
-  },
+  "credentials": [
+    {
+      "id": "AjejUStYwZueWcVYAeSBlg==",
+      "kind": "SOFTWARE P-256, dress rehearsal only"
+    },
+    {
+      "id": "ebUZ2VmuWUko1xD4CiNfVg==",
+      "kind": "SOFTWARE P-256, dress rehearsal only (second)"
+    }
+  ],
   "wallet_frozen": true,
   "notes": "public data only; private keys are in ~/.leash-testnet and ~/.near-credentials",
   "funded_wallet_balance": "500000000"
