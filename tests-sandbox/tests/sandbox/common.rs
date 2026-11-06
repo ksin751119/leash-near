@@ -301,3 +301,235 @@ pub fn set_rule_payload(node: &str, rule: &leash_contract::rule::Rule) -> Vec<u8
 pub fn why(res: near_workspaces::result::ExecutionFinalResult) -> String {
     format!("{:?}", res.into_result().expect_err("the call was expected to fail"))
 }
+
+// ---------------------------------------------------------------------------------------
+// Setting a rule, and the agent accounts that spend against it
+// ---------------------------------------------------------------------------------------
+//
+// `rules.rs` (Task 5) carries its own older copies of the three signing helpers below. These
+// are the shared ones: anything written after Task 6 uses them from here, so that the way a
+// test configures a node lives in one place rather than growing a copy per file.
+
+use near_workspaces::result::ExecutionFinalResult;
+use near_workspaces::types::NearToken;
+use serde_json::json;
+
+/// A rule's JSON, as the contract's own serializer writes it. Going through the contract's
+/// `Rule` type rather than a hand-built object means a test cannot submit a field the
+/// contract does not have, or miss one it does.
+pub fn rule_json(r: &leash_contract::rule::Rule) -> serde_json::Value {
+    serde_json::from_str(&near_sdk::serde_json::to_string(r).expect("Rule serialises"))
+        .expect("serde_json agrees with near_sdk's")
+}
+
+/// `Rule::try_new` with `&str` payees. Panics on an invalid rule: a test that writes one has
+/// a typo, and it should name itself rather than arrive as a failed contract call later.
+#[allow(clippy::too_many_arguments)]
+pub fn rule(
+    token: &str,
+    per_tx_limit: u128,
+    period_limit: u128,
+    period_ms: u64,
+    window_start_ms: u64,
+    window_end_ms: u64,
+    payees: &[&str],
+    paused: bool,
+) -> leash_contract::rule::Rule {
+    leash_contract::rule::Rule::try_new(
+        token.parse().expect("valid token id"),
+        per_tx_limit,
+        period_limit,
+        period_ms,
+        window_start_ms,
+        window_end_ms,
+        payees.iter().map(|p| p.parse().expect("valid payee id")).collect(),
+        paused,
+    )
+    .expect("the test wrote an invalid rule")
+}
+
+/// Register `pk` as a credential that may authorise loosenings. ADMIN only, so it goes
+/// through the fixture's admin account.
+pub async fn register_passkey(fx: &Fixture, pk: &Passkey) -> anyhow::Result<()> {
+    fx.admin
+        .call(fx.wallet.id(), "register_credential")
+        .args_json(pk.registration())
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    Ok(())
+}
+
+/// The nonce the credential's next challenge must carry.
+pub async fn nonce_of(fx: &Fixture, pk: &Passkey) -> anyhow::Result<u64> {
+    let n: Option<u64> = fx
+        .wallet
+        .view("credential_nonce")
+        .args_json(json!({ "credential_id": STANDARD.encode(&pk.credential_id) }))
+        .await?
+        .json()?;
+    n.ok_or_else(|| anyhow::anyhow!("credential is not registered"))
+}
+
+/// Sign `rule` for `node` as a `set_rule`, at the credential's current nonce.
+pub async fn sign_rule(
+    fx: &Fixture,
+    pk: &Passkey,
+    node: &str,
+    r: &leash_contract::rule::Rule,
+) -> anyhow::Result<AssertionJson> {
+    let nonce = nonce_of(fx, pk).await?;
+    Ok(pk.assert_over(&gate_challenge(
+        ACTION_SET_RULE,
+        &set_rule_payload(node, r),
+        nonce,
+        fx.wallet.id().as_str(),
+    )))
+}
+
+/// `set_rule` as ADMIN, with a freshly signed assertion, asserting that it landed.
+///
+/// Every rule these tests set is a loosening — the first rule for a node always is — so
+/// every one of them needs a signature. That is the gate working, not a detour around it.
+pub async fn set_rule_signed(
+    fx: &Fixture,
+    pk: &Passkey,
+    node: &str,
+    r: &leash_contract::rule::Rule,
+) -> anyhow::Result<()> {
+    let assertion = sign_rule(fx, pk, node, r).await?;
+    let res = fx
+        .admin
+        .call(fx.wallet.id(), "set_rule")
+        .args_json(json!({ "node": node, "rule": rule_json(r), "assertion": assertion }))
+        .max_gas()
+        .transact()
+        .await?;
+    anyhow::ensure!(res.is_success(), "a signed set_rule failed: {res:#?}");
+    Ok(())
+}
+
+/// Pause or unpause the whole account. Pausing needs no assertion; unpausing does, which is
+/// why this only pauses.
+pub async fn pause_account(fx: &Fixture) -> anyhow::Result<()> {
+    fx.admin
+        .call(fx.wallet.id(), "set_paused")
+        .args_json(json!({ "paused": true, "assertion": null }))
+        .max_gas()
+        .transact()
+        .await?
+        .into_result()?;
+    Ok(())
+}
+
+/// Create `<name>.<parent>` with a full-access key and `near` NEAR to pay for gas.
+///
+/// The balance has to cover what this account will itself spend on creating children: `ops`
+/// pays for both agent accounts out of its own balance, so it needs more than they do.
+pub async fn subaccount(parent: &Account, name: &str, near: u128) -> anyhow::Result<Account> {
+    Ok(parent
+        .create_subaccount(name)
+        .initial_balance(NearToken::from_near(near))
+        .transact()
+        .await?
+        .into_result()?)
+}
+
+/// The two agents and the node they share, created under the sandbox root.
+///
+/// The names are the point: `pay.ops.…` and `subs.ops.…` both derive to `ops.…`, so one rule
+/// governs both processes and the budget is drawn down by two callers with no channel between
+/// them. That is the shared-budget claim, and it is enforced by the protocol's naming rule
+/// rather than by any registry in this contract.
+pub struct Agents {
+    pub node: String,
+    pub pay: Account,
+    pub subs: Account,
+}
+
+/// `ops.<root>` with two agent accounts under it. The node account itself exists only to be a
+/// name and a parent — the contract never looks it up and it never signs anything.
+pub async fn agents(fx: &Fixture) -> anyhow::Result<Agents> {
+    let root = fx.worker.root_account()?;
+    let ops = subaccount(&root, "ops", 30).await?;
+    let pay = subaccount(&ops, "pay", 10).await?;
+    let subs = subaccount(&ops, "subs", 10).await?;
+    Ok(Agents { node: ops.id().to_string(), pay, subs })
+}
+
+/// `agent` signing with a function-call key on **its own** account, restricted to calling
+/// `spend` on the wallet and nothing else.
+///
+/// This is the key an agent process actually holds, and using it in a test proves two things
+/// a full-access key would not: that `spend` is reachable from a restricted key at all, and
+/// that it works with **no deposit attached** — a function-call key cannot attach one, which
+/// is why the contract pays NEP-141's one yoctoNEAR itself.
+pub async fn restricted_key(fx: &Fixture, agent: &Account) -> anyhow::Result<Account> {
+    let sk = SecretKey::from_random(near_workspaces::types::KeyType::ED25519);
+    agent
+        // `Account::batch` wants the receiver; the key being added lives on `agent` itself and
+        // is restricted to calling the wallet, which is the two halves of this line.
+        .batch(agent.id())
+        .add_key(sk.public_key(), AccessKey::function_call_access(fx.wallet.id(), &["spend"], None))
+        .transact()
+        .await?
+        .into_result()?;
+    Ok(Account::from_secret_key(agent.id().clone(), sk, &fx.worker))
+}
+
+/// Call `spend` as `caller`. Returns the raw result, because most of these tests care that
+/// the transaction *succeeded* while the payment did not.
+pub async fn spend(
+    fx: &Fixture,
+    caller: &Account,
+    token: &str,
+    payee: &str,
+    amount: u128,
+) -> anyhow::Result<ExecutionFinalResult> {
+    Ok(caller
+        .call(fx.wallet.id(), "spend")
+        .args_json(json!({ "token": token, "payee": payee, "amount": amount.to_string() }))
+        .max_gas()
+        .transact()
+        .await?)
+}
+
+/// The NEP-141 balance of one account on the fixture's token.
+pub async fn balance_of(fx: &Fixture, account: &str) -> anyhow::Result<u128> {
+    let b: String = fx
+        .token
+        .view("ft_balance_of")
+        .args_json(json!({ "account_id": account }))
+        .await?
+        .json()?;
+    Ok(b.parse()?)
+}
+
+/// `spent_in_period` for a node, as a number.
+pub async fn spent_in_period(fx: &Fixture, node: &str) -> anyhow::Result<u128> {
+    let s: String = fx
+        .wallet
+        .view("spent_in_period")
+        .args_json(json!({ "node": node }))
+        .await?
+        .json()?;
+    Ok(s.parse()?)
+}
+
+/// The decision ring, newest first, as raw JSON — the shape the demo page receives.
+pub async fn recent_decisions(fx: &Fixture) -> anyhow::Result<Vec<serde_json::Value>> {
+    Ok(fx.wallet.view("recent_decisions").await?.json()?)
+}
+
+/// The outcome of the newest decision, parsed back into the contract's own enum through the
+/// wire shape a client sees.
+pub async fn newest_outcome(fx: &Fixture) -> anyhow::Result<leash_contract::decision::Outcome> {
+    let all = recent_decisions(fx).await?;
+    let newest = all.first().ok_or_else(|| anyhow::anyhow!("no decisions recorded"))?;
+    // Through a string, so this compiles whether or not cargo unified the test's `serde_json`
+    // with `near_sdk`'s. Deserialising rather than reading the fields is the point: it checks
+    // that the shape a client receives really does parse back into the contract's own enum.
+    let s = serde_json::to_string(&newest["outcome"])?;
+    Ok(near_sdk::serde_json::from_str(&s)?)
+}

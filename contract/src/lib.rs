@@ -1,13 +1,18 @@
 pub mod challenge;
+pub mod decision;
 pub mod node;
 pub mod rule;
+pub mod spend;
 pub mod state;
 pub mod webauthn;
 
 use crate::challenge::{
     gate_challenge, set_rule_payload, ACTION_ADD_PAYEE, ACTION_SET_RULE, ACTION_UNPAUSE,
 };
+use crate::decision::{Decision, Outcome, RefusalView, REFUSALS};
+use crate::node::node_of;
 use crate::rule::{classify, Change, Rule};
+use crate::spend::{evaluate, Attempt};
 use crate::state::{State, MAX_CREDENTIALS};
 use crate::webauthn::{verify_assertion, Assertion, Credential};
 use near_sdk::json_types::{Base64VecU8, U128};
@@ -41,12 +46,33 @@ const MAX_NEW_PAYEES_PER_CALL: usize = 8;
 /// `on_payees_registered`.
 const STORAGE_DEPOSIT_RESULT_LIMIT: usize = 512;
 
+/// The one yoctoNEAR NEP-141 requires on `ft_transfer`, so that a transfer is always signed
+/// by a full-access key — or, here, attached by the contract from the wallet account's own
+/// balance. **A function-call access key cannot attach a deposit at all**, which is why
+/// `spend` is not `#[payable]` and must work with nothing attached.
+const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);
+
+/// Gas for the payment path. `ft_transfer` on a NEP-141 is a balance read and two writes;
+/// 20 TGas is several times what the test token needs and leaves headroom for a token that
+/// does more. The callback only releases a reservation and rewrites one ring-buffer slot.
+///
+/// Both are *static* gas, so the figures do not change with however much gas an agent
+/// attaches, and `a_payment_fits_in_gas` measures the whole call against the 300 TGas limit.
+const FT_TRANSFER_GAS: Gas = Gas::from_tgas(20);
+const TRANSFER_CALLBACK_GAS: Gas = Gas::from_tgas(15);
+
+/// Bound on the bytes read back from `ft_transfer`. NEP-141's `ft_transfer` returns nothing;
+/// the value is never read here, only whether the promise failed, so — as with
+/// `STORAGE_DEPOSIT_RESULT_LIMIT` — a result that exceeds this still counts as success.
+const FT_TRANSFER_RESULT_LIMIT: usize = 512;
+
 /// The slice of NEP-141 this contract calls. `ext_contract` generates the `ext_ft` builder
 /// from it; the trait itself is never implemented here, hence the allow.
 #[ext_contract(ext_ft)]
 #[allow(dead_code)]
 trait FungibleToken {
     fn storage_deposit(&mut self, account_id: Option<AccountId>);
+    fn ft_transfer(&mut self, receiver_id: AccountId, amount: U128, memo: Option<String>);
 }
 
 /// The wallet account's contract. The account that hosts it has its full-access keys
@@ -85,10 +111,13 @@ pub struct LeashAccount {
 /// | `remove_payee` | `assert_admin` |
 /// | `set_paused` | `assert_admin`, plus the passkey gate on unpausing |
 /// | `on_payees_registered` | `#[private]` **and** a check that the promise results it was told to expect are present — see its own doc comment |
+/// | `spend` | **Nothing. Deliberately open to any caller** — the rule for the node derived from `predecessor_id` is the only authorisation there is, and a caller with no rule is refused with code 1. See `spend`'s own doc comment |
+/// | `on_transfer` | `#[private]` **and** a check that exactly one promise result is present — the same pairing as `on_payees_registered`, for the same reason |
 ///
-/// Everything else here takes `&self` and writes nothing. `on_payees_registered` is the only
-/// place `#[private]` is load-bearing, and the only place it must be, because it is the only
-/// promise target. Anything added to this block that writes state belongs in that table.
+/// Everything else here takes `&self` and writes nothing. `on_payees_registered` and
+/// `on_transfer` are the only promise targets, so they are the only two places `#[private]` is
+/// load-bearing — and in both, `#[private]` alone would be satisfied by an agent key.
+/// Anything added to this block that writes state belongs in that table.
 #[near]
 impl LeashAccount {
     /// Initialise the wallet.
@@ -502,8 +531,252 @@ impl LeashAccount {
     }
 
     // ===================================================================================
+    // The payment path
+    // ===================================================================================
+
+    /// Pay `payee` `amount` of `token`, if this caller's node allows it. **Open to any
+    /// caller, and that is the design** — the rule for the node derived from
+    /// `predecessor_account_id` is the whole of the authorisation, so a caller with no rule
+    /// is refused with code 1 rather than rejected at the door.
+    ///
+    /// # A refusal is not an error
+    ///
+    /// Every policy refusal **returns normally**: it writes a [`Decision`] to the ring
+    /// buffer, emits an event, and answers `Outcome::Refused(code)` in a transaction that
+    /// succeeds. Nothing here panics on a refusal, and that is the single most important
+    /// property of this method. `env::panic_str` would roll back the ring-buffer write and
+    /// leave a failed transaction with no on-chain record of *why* — and the refusal is the
+    /// product, so it has to be durable and legible. (Contrast the ADMIN methods above, which
+    /// panic freely: a failed admin call is not a product feature.)
+    ///
+    /// The seven codes and the order they are checked in live in `spend.rs`; the sentence
+    /// each one reads as lives in `decision.rs`, and a refusal carries both on the wire.
+    ///
+    /// # Why `token` is an argument
+    ///
+    /// Because otherwise refusal code 3 could not exist. A contract that assumed its own
+    /// `token` would silently pay out of whatever the rule names, and "this node may only
+    /// spend USDC" would be a sentence with no check behind it. The caller says which token
+    /// it believes it is spending, and the rule decides whether it is right.
+    ///
+    /// # Reserve, then dispatch
+    ///
+    /// `ft_transfer` is a cross-contract call, and other `spend` calls arrive while it is in
+    /// flight. So `amount` goes onto the node's `spent` **before** the transfer is dispatched:
+    /// a second agent in the same block sees the reservation and is refused with code 6
+    /// rather than spending the same headroom twice. If the transfer then fails, `on_transfer`
+    /// puts the reservation back. This is the one place in the contract where a bug silently
+    /// loses money or silently loses a limit.
+    ///
+    /// # Zero deposit
+    ///
+    /// Not `#[payable]`: a function-call access key cannot attach a deposit, and an agent
+    /// holds exactly such a key. The one yoctoNEAR that NEP-141 requires on `ft_transfer` is
+    /// attached by this contract out of the wallet account's own balance.
+    ///
+    /// # What the caller gets back
+    ///
+    /// `Outcome` either way, so a caller reads one shape: `{"status":"refused","code":4,
+    /// "reason":"…"}` immediately on a refusal, or the callback's `{"status":"allowed"}` /
+    /// `{"status":"failed"}` once the transfer has resolved.
+    pub fn spend(
+        &mut self,
+        token: AccountId,
+        payee: AccountId,
+        amount: U128,
+    ) -> PromiseOrValue<Outcome> {
+        let agent = env::predecessor_account_id();
+        let node = node_of(&agent);
+        let now_ms = env::block_timestamp_ms();
+        // Both `None` for a caller whose id does not derive to a node at all, which
+        // `evaluate` refuses with the same code as a node that has no rule: from the chain's
+        // side the two are one fact, that this caller has no budget.
+        let rule = node.as_ref().and_then(|n| self.state.rule_of(n));
+        let spent = node.as_ref().map_or(0, |n| self.state.spent_in_period(n, now_ms));
+
+        let verdict = evaluate(
+            rule.as_ref(),
+            &Attempt {
+                token: &token,
+                payee: &payee,
+                amount: amount.0,
+                spent,
+                now_ms,
+                account_paused: self.paused,
+            },
+        );
+
+        if let Err(code) = verdict {
+            self.record(
+                decision::EVENT_REFUSED,
+                Decision {
+                    agent,
+                    node,
+                    payee,
+                    amount: amount.0,
+                    outcome: Outcome::Refused(code),
+                    // The untouched figure: a refusal reserves nothing.
+                    spent_after: spent,
+                    timestamp_ms: now_ms,
+                },
+            );
+            return PromiseOrValue::Value(Outcome::Refused(code));
+        }
+
+        // `evaluate` returning `Ok` means it found a rule, which means it had a node.
+        let node =
+            node.unwrap_or_else(|| env::panic_str("internal: an allowed payment with no node"));
+
+        // The reservation, before anything is dispatched.
+        self.state.add_spent(&node, amount.0, now_ms);
+        let spent_after = self.state.spent_in_period(&node, now_ms);
+        // Read after the reservation, because `add_spent` rolls an elapsed window first. The
+        // callback needs the window this reservation belongs to, so that a release cannot
+        // land on a later one; see `State::release_reservation`.
+        let reserved_window_ms = self
+            .state
+            .window_began_ms(&node, now_ms)
+            .unwrap_or_else(|| env::panic_str("internal: a reserved node with no window"));
+
+        let record_id = self.record(
+            decision::EVENT_ALLOWED,
+            Decision {
+                agent,
+                node: Some(node.clone()),
+                payee: payee.clone(),
+                amount: amount.0,
+                outcome: Outcome::Allowed,
+                spent_after,
+                timestamp_ms: now_ms,
+            },
+        );
+
+        PromiseOrValue::Promise(
+            ext_ft::ext(token)
+                .with_attached_deposit(ONE_YOCTO)
+                .with_static_gas(FT_TRANSFER_GAS)
+                .ft_transfer(payee, amount, None)
+                .then(
+                    Self::ext(env::current_account_id())
+                        .with_static_gas(TRANSFER_CALLBACK_GAS)
+                        .on_transfer(node, record_id, amount, reserved_window_ms),
+                ),
+        )
+    }
+
+    /// Settle a dispatched payment. Returns what actually happened.
+    ///
+    /// On success the record stands as `Allowed` and an event says so. On failure the
+    /// reservation is **released** and the record is rewritten as `Failed`.
+    ///
+    /// `Failed` carries no error text, and that is not laziness: a NEAR callback is told only
+    /// *that* a promise failed — `PromiseResult::Failed` has no payload — so any message here
+    /// would be invented. The reason is in the failed receipt, which the explorer shows.
+    ///
+    /// # Why `#[private]` is not enough here
+    ///
+    /// The same reason as `on_payees_registered`, and it is worth saying twice. `#[private]`
+    /// checks that the predecessor is this account, and the agent's function-call keys live
+    /// **on this account** — so an agent key arrives with exactly that predecessor and sails
+    /// through. On its own, `#[private]` would let any key on the wallet account call this
+    /// with any `node`, `amount` and `record_id` it liked: free headroom on a node, and a
+    /// rewritten decision log.
+    ///
+    /// So it is paired with a check that this really is a callback. `ft_transfer` is dispatched
+    /// as exactly one promise, so exactly one promise result must be present; a direct
+    /// function call has none, and a function-call access key cannot build a promise chain.
+    /// `on_transfer_cannot_be_driven_by_an_agent_key` calls it from a key on the wallet
+    /// account — the strongest form of the test, because `#[private]` is satisfied for that
+    /// caller and the callback check is the only thing left to refuse it.
+    #[private]
+    pub fn on_transfer(
+        &mut self,
+        node: AccountId,
+        record_id: u64,
+        amount: U128,
+        reserved_window_ms: u64,
+    ) -> Outcome {
+        require!(
+            env::promise_results_count() == 1,
+            "this method is a callback; it is not callable directly"
+        );
+        // Only `Failed` means the transfer did not happen. A result too long for the bound
+        // still succeeded, and nothing here reads the value — NEP-141's `ft_transfer` returns
+        // none.
+        let failed = matches!(
+            env::promise_result_checked(0, FT_TRANSFER_RESULT_LIMIT),
+            Err(PromiseError::Failed)
+        );
+        if !failed {
+            // Nothing to rewrite: the record already says `Allowed`, and overwriting its
+            // `spent_after` with the figure as it stands now would credit this payment with
+            // whatever other agents have spent in the meantime.
+            self.announce(decision::EVENT_SETTLED, record_id, &node, amount.0);
+            return Outcome::Allowed;
+        }
+
+        let now_ms = env::block_timestamp_ms();
+        let released = self
+            .state
+            .release_reservation(&node, amount.0, reserved_window_ms, now_ms);
+        if !released {
+            // The window the reservation belonged to is gone — it rolled, or a signed
+            // widening reset the ledger — so its `spent` was zeroed with it and there is
+            // nothing to give back. Taking the amount off the *current* window would hand
+            // out headroom nobody paid for.
+            env::log_str(&format!(
+                "on_transfer: {node}'s transfer of {} failed after its budget window moved on; \
+                 nothing to release",
+                amount.0
+            ));
+        }
+        let spent_after = self.state.spent_in_period(&node, now_ms);
+        self.state
+            .settle_decision(record_id, Outcome::Failed, spent_after);
+        self.announce(decision::EVENT_FAILED, record_id, &node, amount.0);
+        Outcome::Failed
+    }
+
+    // ===================================================================================
     // Views
     // ===================================================================================
+
+    /// The last 20 decisions, newest first. The demo page's whole data source: a view call is
+    /// free, synchronous and unthrottled, so there is no indexer anywhere in this project.
+    ///
+    /// An `Allowed` entry means policy allowed it and the transfer was dispatched. It becomes
+    /// `Failed` if the transfer failed, one block later; it is not rewritten on success, so
+    /// `Allowed` covers both "settled" and the one block where it is still in flight. The
+    /// events distinguish the two for anyone who needs it.
+    pub fn recent_decisions(&self) -> Vec<Decision> {
+        self.state.recent_decisions()
+    }
+
+    /// How many decisions have ever been recorded. The ring holds the last 20, so this is the
+    /// only way to tell 20 from 2,000.
+    ///
+    /// A plain number, not a decimal string: the string convention is for token balances,
+    /// which overflow a JavaScript number, and a count of payments does not.
+    pub fn decision_count(&self) -> u64 {
+        self.state.decisions_written()
+    }
+
+    /// Every reason this contract can refuse a payment: the code and the sentence, from the
+    /// one table in `decision.rs`. Published so the demo page can render reasons without
+    /// keeping its own copy of the mapping, which would drift the first time one is reworded.
+    pub fn refusal_codes(&self) -> Vec<RefusalView> {
+        REFUSALS
+            .iter()
+            .map(|r| RefusalView { code: r.code, reason: r.reason.to_string() })
+            .collect()
+    }
+
+    /// The node an agent account draws on: everything after the first `.`. `None` for an id
+    /// with no separator, which is refused with code 1. Exposed so the demo page can show
+    /// which budget a key belongs to before it spends anything.
+    pub fn node_for(&self, agent: AccountId) -> Option<AccountId> {
+        node_of(&agent)
+    }
 
     pub fn rule_of(&self, node: AccountId) -> Option<Rule> {
         self.state.rule_of(&node)
@@ -699,6 +972,30 @@ impl LeashAccount {
                     new_payees.len() as u64,
                 ),
         ))
+    }
+
+    /// Write `entry` to the decision ring, emit `event` for it, and return the id the ring
+    /// gave it. The id is what `on_transfer` uses to find the record again.
+    ///
+    /// The two always happen together, so neither `spend` nor the callback can log a decision
+    /// without announcing it or announce one it never logged.
+    fn record(&mut self, event: &str, entry: Decision) -> u64 {
+        let id = self.state.push_decision(entry.clone());
+        decision::emit(event, id, &entry);
+        id
+    }
+
+    /// Emit `event` for decision `record_id`, carrying the whole record when the ring still
+    /// holds it.
+    ///
+    /// It may not: twenty later decisions can land while one transfer is in flight, and the
+    /// ring is exactly twenty. The settlement still happened, so it is still announced — with
+    /// what the callback knows rather than nothing at all. See `decision::emit_evicted`.
+    fn announce(&self, event: &str, record_id: u64, node: &AccountId, amount: u128) {
+        match self.state.decision(record_id) {
+            Some(entry) => decision::emit(event, record_id, entry),
+            None => decision::emit_evicted(event, record_id, node, amount),
+        }
     }
 
     /// Every method in this task is an ADMIN operation, so every one of them starts here.

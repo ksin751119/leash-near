@@ -28,6 +28,15 @@ A whole `set_rule` costs three different amounts depending on what it does, and 
 
 So the passkey gate costs about 32.1 TGas and registering one payee about 4.6 TGas. Measured by `a_widening_set_rule_fits_in_gas` in `tests-sandbox/tests/sandbox/rules.rs`.
 
+The payment path is far cheaper, because no signature is checked on it:
+
+| `spend` | Gas | What it pays for |
+| --- | --- | --- |
+| allowed | 7.9 TGas | the seven checks, the reservation, `ft_transfer` on the token, and the callback that settles it |
+| refused | 2.6 TGas | the seven checks and one ring-buffer write — no cross-contract call at all |
+
+Measured by `a_payment_fits_in_gas` in `tests-sandbox/tests/sandbox/spend.rs`. A refused payment is a *successful* transaction: the contract records the decision, emits an event and returns `{"status":"refused","code":4,"reason":"payee is not on the allow-list"}` rather than panicking, because a panic would roll back the record and leave nothing on chain to say why. Each of the seven codes has a test asserting all three things at once — the transaction succeeded, no balance moved, and the recorded decision names the code.
+
 Every figure here is from the same sandbox on the same machine, so they are comparable to each other and are not a claim about any particular validator. They are quoted to one decimal because the exact gas count moves a little between runs: the sandbox creates accounts named `dev-<timestamp>-<random>`, and an account id's length is part of what a receipt costs. Run the tests above to see the current numbers.
 
 They all assume the wasm is built with `--cfg near`; without it near-sdk compiles its environment calls to pure-Rust fallbacks, which costs slightly less and throws away every panic message. `scripts/build-contract.sh` sets that flag and refuses to hand over a wasm that does not carry it.
@@ -63,4 +72,6 @@ cargo test --test account_is_frozen
 cargo test --test test_token
 cargo test --test widen_requires_passkey -- --nocapture   # prints the verification gas figure
 cargo test --test rules -- --nocapture                    # prints the set_rule gas figures
+cargo test --test spend -- --nocapture                    # prints the spend gas figures
+cargo test --test concurrency -- --nocapture              # two agents, one budget
 ```

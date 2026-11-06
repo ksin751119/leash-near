@@ -72,8 +72,9 @@
 //! - `nodes` grows only when ADMIN configures a new node, one bounded record each.
 
 use crate::rule::Rule;
+use crate::decision::{Decision, Outcome, RING_CAPACITY};
 use crate::webauthn::Credential;
-use near_sdk::store::IterableMap;
+use near_sdk::store::{IterableMap, Vector};
 use near_sdk::{near, AccountId, BorshStorageKey};
 
 /// How many passkeys may be registered and usable at once. More than one matters — a single
@@ -90,6 +91,9 @@ pub const MAX_CREDENTIALS: usize = 8;
 enum Prefix {
     Nodes,
     Credentials,
+    // Appended, not inserted: these are borsh discriminants, so reordering them would point
+    // the live maps at each other's storage.
+    Decisions,
 }
 
 /// A node's rule, its ledger, and the two counters that must not live inside the rule.
@@ -115,6 +119,12 @@ pub struct NodeRecord {
 pub struct State {
     nodes: IterableMap<AccountId, NodeRecord>,
     credentials: IterableMap<Vec<u8>, Credential>,
+    /// The decision ring. At most [`RING_CAPACITY`] entries; slot `id % RING_CAPACITY` holds
+    /// decision `id`. See [`State::push_decision`].
+    decisions: Vector<Decision>,
+    /// How many decisions have ever been written. Also the id the next one gets, which is
+    /// what lets a callback find its own record without a second index.
+    decisions_written: u64,
 }
 
 impl Default for State {
@@ -128,6 +138,8 @@ impl State {
         Self {
             nodes: IterableMap::new(Prefix::Nodes),
             credentials: IterableMap::new(Prefix::Credentials),
+            decisions: Vector::new(Prefix::Decisions),
+            decisions_written: 0,
         }
     }
 
@@ -259,11 +271,103 @@ impl State {
 
     /// Release a reservation whose transfer failed. Rolls first, for the same reason, and
     /// floors at zero rather than wrapping.
+    ///
+    /// Prefer [`State::release_reservation`] for a transfer that failed: it checks that the
+    /// reservation still belongs to the current window first.
     pub fn sub_spent(&mut self, node: &AccountId, amount: u128, now_ms: u64) {
         self.roll_window(node, now_ms);
         if let Some(r) = self.nodes.get_mut(node) {
             r.spent = r.spent.saturating_sub(amount);
         }
+    }
+
+    /// Release a reservation that was made in the window beginning at `reserved_window_ms`.
+    /// Returns whether anything was released.
+    ///
+    /// **The window check is the point of this method.** A reservation is made in `spend` and
+    /// released in the callback, which runs in a later block — so a period boundary, or an
+    /// accepted widening, can fall between the two. A plain `sub_spent` would then take the
+    /// amount off whatever window is current *now*, handing a node free headroom it never
+    /// paid for: reserve 500 at the end of a period, roll, another agent spends 500 in the new
+    /// period, our transfer fails, and the new period's ledger reads zero. With a one-second
+    /// test period that is routine rather than theoretical.
+    ///
+    /// If the window has moved on there is nothing to release: the reservation's window is
+    /// gone, and `roll_window` already zeroed its `spent` (or an accepted widening did).
+    pub fn release_reservation(
+        &mut self,
+        node: &AccountId,
+        amount: u128,
+        reserved_window_ms: u64,
+        now_ms: u64,
+    ) -> bool {
+        if self.window_began_ms(node, now_ms) != Some(reserved_window_ms) {
+            return false;
+        }
+        self.sub_spent(node, amount, now_ms);
+        true
+    }
+
+    // --- the decision ring ------------------------------------------------------------
+
+    /// Record `decision` and return its id.
+    ///
+    /// The id is how many decisions have ever been written, so decision `id` lives in slot
+    /// `id % RING_CAPACITY` and is still there exactly while `id + RING_CAPACITY >
+    /// decisions_written`. That is the whole index: no second map, and no id stored inside
+    /// the record for a callback to match on.
+    ///
+    /// The ring is why the log cannot grow: the contract account stakes the storage, and
+    /// after [`RING_CAPACITY`] entries every write overwrites one.
+    pub fn push_decision(&mut self, decision: Decision) -> u64 {
+        let id = self.decisions_written;
+        if (self.decisions.len() as u64) < RING_CAPACITY {
+            self.decisions.push(decision);
+        } else {
+            self.decisions.set((id % RING_CAPACITY) as u32, decision);
+        }
+        self.decisions_written = id.saturating_add(1);
+        id
+    }
+
+    /// Finalise decision `id` — the callback's job. Returns false if the ring has moved past
+    /// it, which is not an error: `RING_CAPACITY` later decisions have been recorded since,
+    /// and the honest log of the last twenty no longer includes this one. The reservation is
+    /// released regardless; that accounting does not live here.
+    pub fn settle_decision(&mut self, id: u64, outcome: Outcome, spent_after: u128) -> bool {
+        if id >= self.decisions_written || id + RING_CAPACITY <= self.decisions_written {
+            return false;
+        }
+        let Some(d) = self.decisions.get_mut((id % RING_CAPACITY) as u32) else {
+            return false;
+        };
+        d.outcome = outcome;
+        d.spent_after = spent_after;
+        true
+    }
+
+    /// Decision `id`, while the ring still holds it. `None` once `RING_CAPACITY` later
+    /// decisions have evicted it.
+    pub fn decision(&self, id: u64) -> Option<&Decision> {
+        if id >= self.decisions_written || id + RING_CAPACITY <= self.decisions_written {
+            return None;
+        }
+        self.decisions.get((id % RING_CAPACITY) as u32)
+    }
+
+    /// The last [`RING_CAPACITY`] decisions, newest first.
+    pub fn recent_decisions(&self) -> Vec<Decision> {
+        let first = self.decisions_written.saturating_sub(RING_CAPACITY);
+        (first..self.decisions_written)
+            .rev()
+            .filter_map(|id| self.decisions.get((id % RING_CAPACITY) as u32).cloned())
+            .collect()
+    }
+
+    /// How many decisions have ever been recorded, which the ring itself cannot show once it
+    /// is full. Also the id the next one will get.
+    pub fn decisions_written(&self) -> u64 {
+        self.decisions_written
     }
 
     // --- credentials ------------------------------------------------------------------
@@ -609,6 +713,153 @@ mod tests {
         // And it floors at zero rather than wrapping to u128::MAX.
         s.sub_spent(&node, 10_000, 5 * DAY);
         assert_eq!(s.spent_in_period(&node, 5 * DAY), 0);
+    }
+
+    // --- releasing a reservation, window-aware ----------------------------------------
+
+    /// The ordinary case: the transfer failed inside the window that reserved the money.
+    #[test]
+    fn a_failed_transfer_in_the_same_window_releases() {
+        let (mut s, node) = spent_node();
+        let window = s.window_began_ms(&node, 5 * DAY).unwrap();
+        assert!(s.release_reservation(&node, 500, window, 5 * DAY));
+        assert_eq!(s.spent_in_period(&node, 5 * DAY), 7_000);
+    }
+
+    /// The case a plain subtraction gets wrong, and it is the one that would hand out free
+    /// money: the callback lands after the window has rolled. The reservation belonged to the
+    /// window that has just been zeroed, so there is nothing to give back — taking it off the
+    /// new window would be headroom nobody paid for.
+    #[test]
+    fn a_reservation_from_a_rolled_window_is_not_released_against_the_new_one() {
+        let (mut s, node) = spent_node();
+        let old_window = s.window_began_ms(&node, 5 * DAY).unwrap();
+
+        // The window rolls, and another agent spends 500 of the new period.
+        let later = 6 * DAY;
+        s.add_spent(&node, 500, later);
+        assert_eq!(s.spent_in_period(&node, later), 500);
+
+        // Now the old reservation's transfer fails.
+        assert!(!s.release_reservation(&node, 7_500, old_window, later));
+        assert_eq!(
+            s.spent_in_period(&node, later),
+            500,
+            "a stale reservation must not be credited against the new window"
+        );
+    }
+
+    /// An accepted widening resets the ledger, which also moves the window start. A
+    /// reservation made before it is just as stale.
+    #[test]
+    fn a_reservation_from_before_a_widening_is_not_released() {
+        let (mut s, node) = spent_node();
+        let old_window = s.window_began_ms(&node, 5 * DAY).unwrap();
+        let now = 5 * DAY + 1_000;
+        s.put_rule(&node, rule_with(2_000, 10_000, DAY), true, now);
+        s.add_spent(&node, 300, now);
+
+        assert!(!s.release_reservation(&node, 7_500, old_window, now));
+        assert_eq!(s.spent_in_period(&node, now), 300);
+    }
+
+    // --- the decision ring ------------------------------------------------------------
+
+    fn decision(amount: u128) -> Decision {
+        Decision {
+            agent: acct("pay.ops.leash.testnet"),
+            node: Some(acct(NODE)),
+            payee: acct("alice.testnet"),
+            amount,
+            outcome: Outcome::Allowed,
+            spent_after: amount,
+            timestamp_ms: 1_000,
+        }
+    }
+
+    #[test]
+    fn decisions_come_back_newest_first() {
+        with_env();
+        let mut s = State::new();
+        for i in 1..=3u128 {
+            s.push_decision(decision(i));
+        }
+        let got: Vec<u128> = s.recent_decisions().iter().map(|d| d.amount).collect();
+        assert_eq!(got, vec![3, 2, 1]);
+    }
+
+    /// Bounded storage is a requirement of the design, not an optimisation: the contract
+    /// account stakes every byte of this log.
+    #[test]
+    fn the_ring_holds_exactly_twenty() {
+        with_env();
+        let mut s = State::new();
+        for i in 1..=25u128 {
+            s.push_decision(decision(i));
+        }
+        let got: Vec<u128> = s.recent_decisions().iter().map(|d| d.amount).collect();
+        assert_eq!(got.len(), RING_CAPACITY as usize);
+        assert_eq!(got.first(), Some(&25), "newest first");
+        assert_eq!(got.last(), Some(&6), "and the five oldest are gone");
+        assert_eq!(s.decisions_written(), 25);
+    }
+
+    #[test]
+    fn ids_count_from_zero_and_identify_the_slot() {
+        with_env();
+        let mut s = State::new();
+        assert_eq!(s.push_decision(decision(1)), 0);
+        assert_eq!(s.push_decision(decision(2)), 1);
+        assert_eq!(s.decisions_written(), 2);
+    }
+
+    #[test]
+    fn settling_rewrites_the_outcome_in_place() {
+        with_env();
+        let mut s = State::new();
+        let id = s.push_decision(decision(100));
+        s.push_decision(decision(200));
+
+        assert!(s.settle_decision(id, Outcome::Failed, 0));
+        let all = s.recent_decisions();
+        assert_eq!(all[1].outcome, Outcome::Failed, "the settled record, not its neighbour");
+        assert_eq!(all[1].spent_after, 0);
+        assert_eq!(all[0].outcome, Outcome::Allowed, "the newer record is untouched");
+    }
+
+    /// A callback whose record has been pushed out of the ring must not write over whatever
+    /// decision now occupies its slot. Releasing the reservation is a separate concern and
+    /// still happens — see `on_transfer`.
+    #[test]
+    fn settling_an_evicted_decision_changes_nothing() {
+        with_env();
+        let mut s = State::new();
+        let id = s.push_decision(decision(1));
+        for i in 2..=21u128 {
+            s.push_decision(decision(i));
+        }
+        assert!(!s.settle_decision(id, Outcome::Failed, 0), "id 0 is gone from the ring");
+        // Slot 0 now holds decision 20 (id 20, amount 21), which must still read Allowed.
+        let newest = &s.recent_decisions()[0];
+        assert_eq!(newest.amount, 21);
+        assert_eq!(newest.outcome, Outcome::Allowed);
+    }
+
+    #[test]
+    fn settling_an_id_that_was_never_written_changes_nothing() {
+        with_env();
+        let mut s = State::new();
+        s.push_decision(decision(1));
+        assert!(!s.settle_decision(5, Outcome::Failed, 0));
+        assert_eq!(s.recent_decisions()[0].outcome, Outcome::Allowed);
+    }
+
+    #[test]
+    fn an_empty_ring_reads_as_no_decisions() {
+        with_env();
+        let s = State::new();
+        assert!(s.recent_decisions().is_empty());
+        assert_eq!(s.decisions_written(), 0);
     }
 
     #[test]

@@ -48,3 +48,11 @@ path = "tests/sandbox/widen_requires_passkey.rs"
 [[test]]
 name = "rules"
 path = "tests/sandbox/rules.rs"
+
+[[test]]
+name = "spend"
+path = "tests/sandbox/spend.rs"
+
+[[test]]
+name = "concurrency"
+path = "tests/sandbox/concurrency.rs"
