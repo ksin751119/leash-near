@@ -17,6 +17,11 @@ async fn transfer_needs_a_registered_receiver() -> anyhow::Result<()> {
         .await?
         .into_result()?;
 
+    // NEP-148: scripts/preflight.sh reads the decimals from here, and a wallet UI would too
+    let meta: serde_json::Value = token.view("ft_metadata").await?.json()?;
+    assert_eq!(meta["decimals"], 6);
+    assert_eq!(meta["symbol"], "USDC");
+
     let transfer = |amount: &str| {
         owner
             .call(token.id(), "ft_transfer")

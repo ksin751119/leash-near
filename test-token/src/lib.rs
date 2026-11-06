@@ -1,5 +1,6 @@
 //! Minimal NEP-141 token for sandbox tests: transfers, balances, storage registration.
-//! Not the full standard (no ft_transfer_call, no metadata).
+//! Not the full standard (no ft_transfer_call). `ft_metadata` (NEP-148) answers decimals and symbol,
+//! which is what scripts/preflight.sh and any wallet UI ask a token for.
 use near_sdk::json_types::U128;
 use near_sdk::store::LookupMap;
 use near_sdk::{
@@ -21,6 +22,17 @@ pub struct TestToken {
 pub struct StorageBalance {
     pub total: U128,
     pub available: U128,
+}
+
+#[near(serializers = [json])]
+pub struct FungibleTokenMetadata {
+    spec: String,
+    name: String,
+    symbol: String,
+    icon: Option<String>,
+    reference: Option<String>,
+    reference_hash: Option<String>,
+    decimals: u8,
 }
 
 #[near]
@@ -66,6 +78,18 @@ impl TestToken {
 
     pub fn ft_decimals(&self) -> u8 {
         self.decimals
+    }
+
+    pub fn ft_metadata(&self) -> FungibleTokenMetadata {
+        FungibleTokenMetadata {
+            spec: "ft-1.0.0".to_string(),
+            name: "Leash test USDC".to_string(),
+            symbol: "USDC".to_string(),
+            icon: None,
+            reference: None,
+            reference_hash: None,
+            decimals: self.decimals,
+        }
     }
 
     /// Registers `account_id` (default: the caller). Refunds anything above the minimum.
