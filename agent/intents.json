@@ -1,0 +1,11 @@
+{
+  "payments": [
+    { "id": "retainer", "text": "pay Acme 1.00 USDC" },
+    { "id": "too-big", "text": "pay Acme 7.00 USDC" },
+    { "id": "stranger", "text": "send 0.10 USDC to leash-adm-1106fcff.testnet" }
+  ],
+  "subscriptions": [
+    { "id": "credits", "text": "pay Inference 0.50 USDC" },
+    { "id": "annual", "text": "pay Inference 4.00 USDC" }
+  ]
+}
