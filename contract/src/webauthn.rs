@@ -330,6 +330,14 @@ mod tests {
     const UV_CLEAR: &str = include_str!("../../tests-sandbox/tests/fixtures/assertion_uv_clear.json");
     const WRONG_CHALLENGE: &str =
         include_str!("../../tests-sandbox/tests/fixtures/assertion_wrong_challenge.json");
+    /// A capture from a real platform authenticator (Chrome on macOS, Touch ID), taken with
+    /// `tools/capture-assertion.html` and dropped in unedited. The other three fixtures are
+    /// minted by a script, so without this one nothing proves the verifier accepts the
+    /// encoding a browser actually produces — 37-byte `authenticatorData`, flags `0x1d`
+    /// (UP, UV, and the backup bits a synced passkey sets), a zero signature counter, and
+    /// `clientDataJSON` in Chrome's exact field order.
+    const REAL_DEVICE: &str =
+        include_str!("../../tests-sandbox/tests/fixtures/assertion_real_device.json");
 
     /// One fixture, decoded. Every byte field in the file is standard base64 (what near-sdk's
     /// `Base64VecU8` uses on the wire), except `client_data_json`, which is the literal JSON
@@ -414,11 +422,40 @@ mod tests {
         load_named("assertion_wrong_challenge.json", WRONG_CHALLENGE)
     }
 
+    fn real_device() -> Fixture {
+        load_named("assertion_real_device.json", REAL_DEVICE)
+    }
+
     // --- the four cases the brief names ------------------------------------------------
 
+    /// Renamed from `accepts_a_real_assertion` (the name the plan gave it) once a capture
+    /// from an actual authenticator landed below: this fixture is minted by a script, and
+    /// two tests cannot both own the word "real".
     #[test]
-    fn accepts_a_real_assertion() {
+    fn accepts_a_well_formed_assertion() {
         assert!(valid().verify().is_ok());
+    }
+
+    /// The claim this project makes on its front page is that a real passkey, held by a
+    /// person, authorises a widening — so the verifier has to accept what a real
+    /// authenticator emits, not only what the fixture script emits. A browser's bytes differ
+    /// from the script's in ways that could plausibly break a parser: the flag byte carries
+    /// the backup bits as well as UV, and `clientDataJSON` carries fields this contract does
+    /// not read.
+    #[test]
+    fn accepts_an_assertion_from_a_real_authenticator() {
+        assert!(real_device().verify().is_ok());
+    }
+
+    /// The flags byte of the real capture is `0x1d`: UP, UV, BE and BS. The backup bits say
+    /// the credential is synced (iCloud Keychain), which is why the module refuses to claim
+    /// the key is hardware-backed — but they must not disturb the UV check, which reads one
+    /// bit and ignores the rest.
+    #[test]
+    fn the_backup_bits_of_a_synced_passkey_do_not_disturb_the_uv_check() {
+        let f = real_device();
+        assert_eq!(f.authenticator_data[32], 0x1d, "UP, UV, BE and BS");
+        assert!(f.verify().is_ok());
     }
 
     #[test]

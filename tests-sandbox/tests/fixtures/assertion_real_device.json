@@ -1,0 +1,24 @@
+{
+  "note": "Captured from a real device by tools/capture-assertion.html. Verifying it proves that the holder of this credential signed this exact challenge and that the authenticator asserted user verification. It does not prove the credential is hardware-backed — there is no attestation here — so the guarantee is only as strong as the registration step.",
+  "credential_id": "L85dOpcJP2KwB1dKsRt2QwfiQi+4l0xX9Gos9XNEhdGGG7hyzZ6TGmM+RQTncPZTkjLFEphOW2jD",
+  "pubkey_sec1": "BA5gwPA1AkcN8t+BgSv12fpnzhZe8OKXGdNq36w2k0UuioHkTOdM+6KYIupxWPyaI5HDEwqley5amdtseb1joVc=",
+  "challenge": "kGzgdNMy5yZulU3brOPTrpYScX5TFOZloRa4dK5+TNU=",
+  "authenticator_data": "SZYN5YgOjGh0NBcPZHZgW4/krrmihjLHmVzzuoMdl2MdAAAAAA==",
+  "client_data_json": "{\"type\":\"webauthn.get\",\"challenge\":\"kGzgdNMy5yZulU3brOPTrpYScX5TFOZloRa4dK5-TNU\",\"origin\":\"http://localhost:8799\",\"crossOrigin\":false}",
+  "signature_der": "MEQCIGsvYI/fKvUxIwuHRUdJWlZ9VQ8NQFlNFcSMneyEXuZ6AiATNRWLJMKA1DOqfEAoz7iRR9k/YWKD9kXaIFU1JK2pTQ==",
+  "meta": {
+    "generated_by": "tools/capture-assertion.html",
+    "captured_at": "2026-11-06T18:51:56.866Z",
+    "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36",
+    "rp_id": "localhost",
+    "origin": "http://localhost:8799",
+    "flags": "0x1d",
+    "user_present": true,
+    "user_verified": true,
+    "sign_count": 0,
+    "signed_challenge": "kGzgdNMy5yZulU3brOPTrpYScX5TFOZloRa4dK5+TNU=",
+    "pubkey_sec1_form": "uncompressed (0x04 ‖ X ‖ Y, 65 bytes)",
+    "pubkey_sec1_compressed": "Aw5gwPA1AkcN8t+BgSv12fpnzhZe8OKXGdNq36w2k0Uu",
+    "signature_s_is_high": false
+  }
+}
