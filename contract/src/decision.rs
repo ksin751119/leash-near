@@ -37,6 +37,8 @@ pub const EVENT_REFUSED: &str = "refused";
 pub const EVENT_ALLOWED: &str = "allowed";
 pub const EVENT_SETTLED: &str = "settled";
 pub const EVENT_FAILED: &str = "failed";
+pub const EVENT_WITHDRAWN: &str = "withdrawn";
+pub const EVENT_WITHDRAW_FAILED: &str = "withdraw_failed";
 
 /// The two bounded logs a decision can land in, as they are named on the wire. A consumer
 /// reads them back through `recent_decisions()` and `recent_stranger_decisions()`
@@ -73,6 +75,12 @@ pub fn emit_evicted(event: &str, record_id: u64, node: &AccountId, amount: u128)
             "evicted": true,
         }),
     );
+}
+
+/// Announce how a withdrawal's transfer went. Carries no record id: a withdrawal is not a
+/// decision and is in neither ring.
+pub fn emit_withdrawal(event: &str, to: &AccountId, amount: u128) {
+    emit_raw(event, json!({ "to": to, "amount": amount.to_string() }));
 }
 
 fn emit_raw(event: &str, data: serde_json::Value) {

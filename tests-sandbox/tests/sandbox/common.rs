@@ -265,6 +265,7 @@ impl Passkey {
 pub const ACTION_SET_RULE: &str = "leash:set_rule:v1";
 pub const ACTION_ADD_PAYEE: &str = "leash:add_payee:v1";
 pub const ACTION_UNPAUSE: &str = "leash:unpause:v1";
+pub const ACTION_WITHDRAW: &str = "leash:withdraw:v1";
 
 /// `sha256(len(action) ‖ action ‖ len(payload) ‖ payload ‖ nonce ‖ len(contract) ‖ contract)`,
 /// written out here independently of the contract. Lengths are `u32` little-endian, the
@@ -289,6 +290,18 @@ pub fn set_rule_payload(node: &str, rule: &leash_contract::rule::Rule) -> Vec<u8
     p.extend_from_slice(&(node.len() as u32).to_le_bytes());
     p.extend_from_slice(node.as_bytes());
     p.extend_from_slice(&near_sdk::borsh::to_vec(rule).expect("a Rule always serialises"));
+    p
+}
+
+/// What a withdrawal signs over: `u32le(len(token)) ‖ token ‖ u32le(len(to)) ‖ to ‖
+/// u128le(amount)`. The amount is last and fixed-width, so the payload needs no further prefix.
+pub fn withdraw_payload(token: &str, to: &str, amount: u128) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&(token.len() as u32).to_le_bytes());
+    p.extend_from_slice(token.as_bytes());
+    p.extend_from_slice(&(to.len() as u32).to_le_bytes());
+    p.extend_from_slice(to.as_bytes());
+    p.extend_from_slice(&amount.to_le_bytes());
     p
 }
 

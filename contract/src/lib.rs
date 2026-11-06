@@ -7,7 +7,8 @@ pub mod state;
 pub mod webauthn;
 
 use crate::challenge::{
-    gate_challenge, set_rule_payload, ACTION_ADD_PAYEE, ACTION_SET_RULE, ACTION_UNPAUSE,
+    gate_challenge, set_rule_payload, withdraw_payload, ACTION_ADD_PAYEE, ACTION_SET_RULE,
+    ACTION_UNPAUSE, ACTION_WITHDRAW,
 };
 use crate::decision::{Decision, DecisionLog, Outcome, RefusalView, REFUSALS};
 use crate::node::node_of;
@@ -118,10 +119,13 @@ pub struct LeashAccount {
 /// | `on_payees_registered` | `#[private]` **and** a check that the promise results it was told to expect are present — see its own doc comment |
 /// | `spend` | **Nothing. Deliberately open to any caller** — the rule for the node derived from `predecessor_id` is the only authorisation there is, and a caller with no rule is refused with code 1. The one thing that openness does let an unknown caller write is a decision record, so those go in their own small ring and cannot evict a configured node's; see `state::push_stranger_decision` |
 /// | `on_transfer` | `#[private]` **and** a check that exactly one promise result is present — the same pairing as `on_payees_registered`, for the same reason |
+/// | `withdraw` | `assert_admin`, plus the passkey gate **always** (under its own action tag, over token, recipient and amount). Spends the credential's nonce and touches nothing else: no node's ledger, no rule |
+/// | `on_withdrawn` | `#[private]` **and** a check that exactly one promise result is present. It writes no state at all (`&self`); it is in this table because it is an exported promise target an agent key on this account could otherwise call |
 ///
 /// Everything else here takes `&self` and writes nothing. `on_payees_registered` and
-/// `on_transfer` are the only promise targets, so they are the only two places `#[private]` is
-/// load-bearing — and in both, `#[private]` alone would be satisfied by an agent key.
+/// `on_transfer` are the promise targets that write state, so they are the two places
+/// `#[private]` is load-bearing — and in both, `#[private]` alone would be satisfied by an agent
+/// key. `on_withdrawn` is the third promise target; it writes nothing, but is guarded the same way.
 /// Anything added to this block that writes state belongs in that table.
 #[near]
 impl LeashAccount {
@@ -307,6 +311,21 @@ impl LeashAccount {
     /// unpausing is account-wide, so there is no node and no rule to bind.
     pub fn challenge_for_unpause(&self, credential_id: Base64VecU8) -> Base64VecU8 {
         self.challenge(ACTION_UNPAUSE, &[], credential_id.as_ref())
+    }
+
+    /// The 32 bytes to sign to authorise `withdraw(to, amount)`, base64. Commits to the
+    /// contract's token, the recipient and the amount.
+    pub fn challenge_for_withdraw(
+        &self,
+        to: AccountId,
+        amount: U128,
+        credential_id: Base64VecU8,
+    ) -> Base64VecU8 {
+        self.challenge(
+            ACTION_WITHDRAW,
+            &withdraw_payload(&self.token, &to, amount.0),
+            credential_id.as_ref(),
+        )
     }
 
     // ===================================================================================
@@ -757,6 +776,77 @@ impl LeashAccount {
             .settle_decision(record_id, Outcome::Failed, spent_after);
         self.announce(decision::EVENT_FAILED, record_id, &node, amount.0);
         Outcome::Failed
+    }
+
+    // ===================================================================================
+    // Withdrawal
+    // ===================================================================================
+
+    /// Move `amount` of the contract's token to `to`. **ADMIN only, and always needs a passkey
+    /// assertion** — this is money leaving outside every rule, the loosest act there is, so it
+    /// is gated like a loosening and has no ungated direction.
+    ///
+    /// Signed under [`ACTION_WITHDRAW`] over the token, the recipient and the amount, so a
+    /// withdrawal signature cannot be redirected into a rule change or stretched to another
+    /// amount or recipient, and none of those can be redirected into a withdrawal.
+    ///
+    /// # Not a node's spending
+    ///
+    /// Nothing here touches the per-node ledger — no reservation, no release. No agent asked
+    /// for this money and no rule allowed it, and charging it to a node would let the owner
+    /// emptying the wallet use up that node's `period_limit` for the day. It also means a
+    /// failed transfer has nothing to give back. What it does write is the credential's nonce,
+    /// spent in this receipt; a failed transfer does not refund it, so a retry needs a fresh
+    /// assertion. That is deliberate: a refund would be a state-writing callback.
+    ///
+    /// Not paused-gated: the account pause stops agents, and the owner getting their money out
+    /// while paused is the point of a pause.
+    ///
+    /// The result is `true` if the token transferred, `false` if it refused (not registered, not
+    /// enough balance) — in a transaction that still succeeds, so the answer is readable.
+    pub fn withdraw(&mut self, to: AccountId, amount: U128, assertion: Assertion) -> Promise {
+        self.assert_admin();
+        require!(amount.0 > 0, "a withdrawal must be of a positive amount");
+        self.consume_assertion(
+            &assertion,
+            ACTION_WITHDRAW,
+            &withdraw_payload(&self.token, &to, amount.0),
+        );
+        ext_ft::ext(self.token.clone())
+            .with_attached_deposit(ONE_YOCTO)
+            .with_static_gas(FT_TRANSFER_GAS)
+            .with_unused_gas_weight(0)
+            .ft_transfer(to.clone(), amount, Some("leash withdraw".to_string()))
+            .then(
+                Self::ext(env::current_account_id())
+                    .with_static_gas(TRANSFER_CALLBACK_GAS)
+                    .with_unused_gas_weight(0)
+                    .on_withdrawn(to, amount),
+            )
+    }
+
+    /// Report how a withdrawal's transfer went: `true` if it landed. Writes **no state**
+    /// (`&self`) — only a log line — so there is nothing to corrupt on either outcome.
+    ///
+    /// `#[private]` is satisfied by any key on this account, so it is paired with a check that
+    /// a promise result is present, as the other callbacks are. A direct call has none.
+    /// `on_withdrawn_cannot_be_driven_by_a_key_on_the_wallet` calls it from a key on the wallet.
+    #[private]
+    pub fn on_withdrawn(&self, to: AccountId, amount: U128) -> bool {
+        require!(
+            env::promise_results_count() == 1,
+            "this method is a callback; it is not callable directly"
+        );
+        let landed = !matches!(
+            env::promise_result_checked(0, FT_TRANSFER_RESULT_LIMIT),
+            Err(PromiseError::Failed)
+        );
+        decision::emit_withdrawal(
+            if landed { decision::EVENT_WITHDRAWN } else { decision::EVENT_WITHDRAW_FAILED },
+            &to,
+            amount.0,
+        );
+        landed
     }
 
     // ===================================================================================

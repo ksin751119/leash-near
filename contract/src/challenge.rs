@@ -33,13 +33,14 @@
 //! different inputs can produce the same byte string. (Dropping the lengths would not be
 //! safe — `"ab" ‖ "c"` and `"a" ‖ "bc"` are the same bytes.)
 //!
-//! # The three actions
+//! # The four actions
 //!
 //! | Action | Tag | Payload | What it authorises |
 //! | --- | --- | --- | --- |
 //! | set a rule | [`ACTION_SET_RULE`] | `u32le(len(node)) ‖ node ‖ borsh(rule)` | `set_rule`, which **resets the spend ledger** |
 //! | add a payee | [`ACTION_ADD_PAYEE`] | the same | `add_payee`, which **leaves the ledger alone** |
 //! | unpause the account | [`ACTION_UNPAUSE`] | empty | `set_paused(false)` |
+//! | withdraw | [`ACTION_WITHDRAW`] | `u32le(len(token)) ‖ token ‖ u32le(len(to)) ‖ to ‖ u128le(amount)` | `withdraw`, money leaving outside every rule |
 //!
 //! `set_rule` and `add_payee` sign over the same payload but under **different tags**, and
 //! that separation is load-bearing. An earlier version shared one tag, on the reasoning that
@@ -101,6 +102,7 @@
 //! - `challenge_for_add_payee(node, payee, credential_id)` — for `add_payee`; it derives the
 //!   resulting rule from stored state, so a client cannot get that part wrong
 //! - `challenge_for_unpause(credential_id)` — for `set_paused(false)`
+//! - `challenge_for_withdraw(to, amount, credential_id)` — for `withdraw`
 //!
 //! `tools/capture-assertion.html` and the demo page both call these, and
 //! `challenge_for_matches_the_documented_layout` in the sandbox tests checks the first
@@ -125,6 +127,10 @@ pub const ACTION_ADD_PAYEE: &str = "leash:add_payee:v1";
 /// there is no node and no rule to bind — the nonce and the contract id are the whole of it.
 pub const ACTION_UNPAUSE: &str = "leash:unpause:v1";
 
+/// Action tag for `withdraw`. The payload commits to the token, the recipient and the amount,
+/// so a signature for one withdrawal cannot be stretched to a bigger one or pointed elsewhere.
+pub const ACTION_WITHDRAW: &str = "leash:withdraw:v1";
+
 /// `u32le(len) ‖ bytes`.
 fn push_len_prefixed(out: &mut Vec<u8>, bytes: &[u8]) {
     // A rule's Borsh encoding and an account id are both far below 4 GiB, so the cast
@@ -147,6 +153,16 @@ pub fn set_rule_payload(node: &AccountId, rule: &Rule) -> Vec<u8> {
     // `gate_challenge`. Anything appended after this needs its own prefix — see the module
     // doc comment, "Adding an action later".
     payload.extend_from_slice(&rule_bytes);
+    payload
+}
+
+/// The payload a withdrawal commits to: `u32le(len(token)) ‖ token ‖ u32le(len(to)) ‖ to ‖
+/// u128le(amount)`. The amount is last and fixed-width, so no further prefix is needed.
+pub fn withdraw_payload(token: &AccountId, to: &AccountId, amount: u128) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(8 + token.len() + to.len() + 16);
+    push_len_prefixed(&mut payload, token.as_bytes());
+    push_len_prefixed(&mut payload, to.as_bytes());
+    payload.extend_from_slice(&amount.to_le_bytes());
     payload
 }
 
@@ -250,7 +266,7 @@ mod tests {
     /// assertion signed for one operation would authorise another with a different effect.
     /// This is the unit-level half of `an_add_payee_assertion_cannot_set_a_rule`.
     #[test]
-    fn the_three_actions_give_three_different_challenges() {
+    fn the_four_actions_give_four_different_challenges() {
         let r = rule("usdc.testnet", 1_000, &["alice.testnet"]);
         let p = set_rule_payload(&acct("ops.leash.testnet"), &r);
         let c = acct(C);
@@ -260,13 +276,34 @@ mod tests {
         assert_ne!(set_rule, add_payee, "set_rule and add_payee must not share a challenge");
         assert_ne!(set_rule, unpause);
         assert_ne!(add_payee, unpause);
+        let w = withdraw_payload(&acct("usdc.testnet"), &acct("alice.testnet"), 5);
+        let withdraw = gate_challenge(ACTION_WITHDRAW, &w, 0, &c);
+        for other in [set_rule, add_payee, unpause] {
+            assert_ne!(withdraw, other);
+        }
+        // Same payload, only the tag differs: still a different challenge.
+        assert_ne!(withdraw, gate_challenge(ACTION_SET_RULE, &w, 0, &c));
+        assert_ne!(withdraw, gate_challenge(ACTION_UNPAUSE, &w, 0, &c));
+    }
+
+    #[test]
+    fn a_withdrawal_challenge_binds_token_recipient_and_amount() {
+        let (t, a, b) = (acct("usdc.testnet"), acct("alice.testnet"), acct("bob.testnet"));
+        let c = acct(C);
+        let ch = |t: &AccountId, to: &AccountId, n: u128| {
+            gate_challenge(ACTION_WITHDRAW, &withdraw_payload(t, to, n), 0, &c)
+        };
+        let base = ch(&t, &a, 5);
+        assert_ne!(base, ch(&t, &b, 5));
+        assert_ne!(base, ch(&t, &a, 6));
+        assert_ne!(base, ch(&acct("dai.testnet"), &a, 5));
     }
 
     /// The tags are distinct strings and none is a prefix of another, so even without the
     /// length prefix no tag could shadow another. Both belts, checked.
     #[test]
     fn no_action_tag_is_a_prefix_of_another() {
-        let tags = [ACTION_SET_RULE, ACTION_ADD_PAYEE, ACTION_UNPAUSE];
+        let tags = [ACTION_SET_RULE, ACTION_ADD_PAYEE, ACTION_UNPAUSE, ACTION_WITHDRAW];
         for (i, a) in tags.iter().enumerate() {
             for (j, b) in tags.iter().enumerate() {
                 if i != j {

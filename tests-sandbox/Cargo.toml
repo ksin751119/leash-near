@@ -56,3 +56,11 @@ path = "tests/sandbox/spend.rs"
 [[test]]
 name = "concurrency"
 path = "tests/sandbox/concurrency.rs"
+
+[[test]]
+name = "withdraw"
+path = "tests/sandbox/withdraw.rs"
+
+[[test]]
+name = "keys"
+path = "tests/sandbox/keys.rs"

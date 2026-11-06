@@ -39,6 +39,10 @@ Measured by `a_payment_fits_in_gas` in `tests-sandbox/tests/sandbox/spend.rs`. N
 
 The decision log is two bounded rings, not one. `spend` is open to any caller on NEAR — the rule for the node derived from the caller's id is the whole of the authorisation, and a caller with no rule is answered with code 1 rather than turned away — so anyone can write to the log, and twenty calls from one stranger would evict every real decision from a single twenty-slot ring. Refusals of callers with no rule therefore go in their own four-slot ring: strangers can only evict strangers, code 1 stays visible, and `stranger_count()` is where a flood shows up. `strangers_cannot_evict_a_real_agents_decisions` pins it.
 
+| `withdraw` | 39.3 TGas | the passkey gate, `ft_transfer` on the token, and a callback that only reports the outcome |
+
+Withdrawal needs a passkey assertion every time, under its own action tag, and does not touch any node's spend ledger. Measured by `a_withdrawal_fits_in_gas` in `tests-sandbox/tests/sandbox/withdraw.rs`.
+
 Every figure here is from the same sandbox on the same machine, so they are comparable to each other and are not a claim about any particular validator. They are quoted to one decimal because the exact gas count moves a little between runs: the sandbox creates accounts named `dev-<timestamp>-<random>`, and an account id's length is part of what a receipt costs. Run the tests above to see the current numbers.
 
 They all assume the wasm is built with `--cfg near`; without it near-sdk compiles its environment calls to pure-Rust fallbacks, which costs slightly less and throws away every panic message. `scripts/build-contract.sh` sets that flag and refuses to hand over a wasm that does not carry it.
