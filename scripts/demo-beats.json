@@ -1,0 +1,21 @@
+{
+  "_comment": "The scripted demo, as data. reset-demo.sh builds the rule below for the budget node; preflight.sh replays `beats` against what is on chain and fails unless every beat would come out as `expect`. docs/demo-script.md is the same sequence in words and a test keeps the two in step. Amounts are base units of a 6-decimal token. Account ids come from deployments/testnet.json: `payee` is a payee id (pay1, pay2) from agent/vendors.json, `{admin}` stands for the admin account.",
+  "rule": {
+    "per_tx_limit": "1000000",
+    "period_limit": "2000000",
+    "period_ms": 86400000,
+    "window_start_ms": 0,
+    "window_end_ms": 18446744073709551615,
+    "payees": ["pay1", "pay2"],
+    "paused": false
+  },
+  "beats": [
+    { "beat": 1, "agent": "alpha", "text": "pay Acme 0.50 USDC",                 "payee": "pay1",    "amount": "500000",  "expect": "allowed" },
+    { "beat": 2, "agent": "alpha", "text": "send 0.10 USDC to {admin}",          "payee": "{admin}", "amount": "100000",  "expect": "refused", "code": 4 },
+    { "beat": 2, "agent": "alpha", "text": "pay Acme 7.00 USDC",                 "payee": "pay1",    "amount": "7000000", "expect": "refused", "code": 5 },
+    { "beat": 3, "agent": "beta",  "text": "pay Inference 0.50 USDC",            "payee": "pay2",    "amount": "500000",  "expect": "allowed" },
+    { "beat": 3, "agent": "beta",  "text": "pay Inference 0.50 USDC",            "payee": "pay2",    "amount": "500000",  "expect": "allowed" },
+    { "beat": 3, "agent": "beta",  "text": "pay Inference 0.50 USDC",            "payee": "pay2",    "amount": "500000",  "expect": "allowed" },
+    { "beat": 3, "agent": "alpha", "text": "pay Acme 0.50 USDC",                 "payee": "pay1",    "amount": "500000",  "expect": "refused", "code": 6 }
+  ]
+}

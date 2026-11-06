@@ -6,9 +6,12 @@ import { readFileSync, existsSync } from "node:fs";
 import { parseInstruction, MAX_AMOUNT } from "./parse.mjs";
 
 const vendors = JSON.parse(readFileSync(new URL("./vendors.json", import.meta.url), "utf8"));
-const P1 = "leash-pay1-1106fcff.testnet";
-const P2 = "leash-pay2-1106fcff.testnet";
-const ADM = "leash-adm-1106fcff.testnet";
+// The accounts come from the deployment files, so a fresh deployment (new account suffix) does not
+// need this file edited.
+const deployment = JSON.parse(readFileSync(new URL("../deployments/testnet.json", import.meta.url), "utf8"));
+const P1 = vendors.find((v) => v.id === "pay1").account;
+const P2 = vendors.find((v) => v.id === "pay2").account;
+const ADM = deployment.admin;
 const run = (t) => parseInstruction(t, vendors, 6);
 const ok = (payee, amount, vendor = null) => ({ payee, amount, vendor });
 const ASK = { ask: true };
@@ -100,7 +103,7 @@ const table = [
   { input: "pay Acme 5.00 USDC unless it's over 3.00", expected: ASK },
   // two payees, or a payee that is only part of a longer token
   { input: "pay acme 5.00 USDC to bob.testnet", expected: ASK },
-  { input: "pay Acme 5.00 USDC to leash-pay1-1106fcff.testnet", expected: ASK },
+  { input: `pay Acme 5.00 USDC to ${P1}`, expected: ASK },
   { input: "pay 5.00 to alice.testnet,bob.testnet", expected: ASK },
   { input: "pay 5.00 to alice.testnet/bob.testnet", expected: ASK },
   { input: "pay 5.00 USDC to alice.testnet bob", expected: ASK },
@@ -189,9 +192,8 @@ test("the reviewer's attack batch: only the listed strings parse, to exactly the
 });
 
 // The exact strings a person will type on camera. Pinned so a later change that breaks a
-// sentence we plan to say live breaks a test instead of the recording. The source of the
-// claims is .superpowers/sdd/2026-10-25-leash-near/safe-phrasings.md (gitignored, so the table
-// lives here; the second test below checks the two agree whenever that file is present).
+// sentence we plan to say live breaks a test instead of the recording. docs/safe-phrasings.md is
+// the list the person recording reads; the second test below checks it names the same phrases.
 const DEMO = [
   ["pay Acme 0.50 USDC", P1, 500_000n],
   ["pay Inference 0.50 USDC", P2, 500_000n],
@@ -208,9 +210,10 @@ test("every demo phrasing parses to exactly the payee and amount the demo claims
   }
 });
 
-test("the demo phrasings in safe-phrasings.md are the ones pinned above (when the file exists)", (t) => {
-  const md = new URL("../.superpowers/sdd/2026-10-25-leash-near/safe-phrasings.md", import.meta.url);
-  if (!existsSync(md)) return t.skip("safe-phrasings.md not present");
-  const said = [...readFileSync(md, "utf8").matchAll(/^\| `([^`]+)` \|/gm)].map((m) => m[1]);
+test("docs/safe-phrasings.md lists exactly the demo phrasings pinned above", () => {
+  const md = new URL("../docs/safe-phrasings.md", import.meta.url);
+  assert.ok(existsSync(md), "docs/safe-phrasings.md is the list the person recording reads; it must exist");
+  // `{admin}` stands for the admin account of the deployment, which differs between deployments.
+  const said = [...readFileSync(md, "utf8").matchAll(/^\| `([^`]+)` \|/gm)].map((m) => m[1].replace("{admin}", ADM));
   assert.deepEqual(said.sort(), DEMO.map((d) => d[0]).sort());
 });

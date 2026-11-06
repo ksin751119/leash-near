@@ -18,5 +18,6 @@
     "kind": "SOFTWARE P-256, shakedown only"
   },
   "wallet_frozen": true,
-  "notes": "public data only; private keys are in ~/.leash-testnet and ~/.near-credentials"
+  "notes": "public data only; private keys are in ~/.leash-testnet and ~/.near-credentials",
+  "funded_wallet_balance": "500000000"
 }
