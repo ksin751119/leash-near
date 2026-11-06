@@ -22,8 +22,13 @@ The scripted rule on the budget node: **1.00 per payment, 2.00 per day**, payees
 
    It prints the plan first, then a challenge, and then waits, saying every ten seconds how long it
    has been waiting. Paste the challenge into `tools/capture-assertion.html` on the device, press
-   Sign, unlock, and save the JSON where the script says. A reset from a used state also costs one
+   Sign, unlock, and press "Send to the waiting script". A reset from a used state also costs one
    scan (a widening reopens the window, a tightening puts the rule back).
+
+   Serve that page with the relay rather than a static server, so the capture comes back on its
+   own: `node tools/assertion-relay.mjs`. Without it the page can only print JSON, and somebody
+   has to carry the file to wherever the script is running — which over an SSH tunnel means two
+   machines and a copy-paste in the middle of a take.
 3. Start the two agents, each its own process with its own key:
 
    ```bash
@@ -169,7 +174,8 @@ What the scripts cover and what they do not. Names below are the ones in `deploy
    `new {owner_id, total_supply, decimals: 6}`, then `storage_deposit` (0.00125 NEAR) for the wallet and every payee
    and `ft_transfer` the funding amount to the wallet (attach `1 yoctoNEAR`). Then `scripts/deploy.sh <wallet> <admin> <token> testnet`.
 3. Register at least two credentials with `scripts/register-credential.sh testnet <credential.json>`
-   (the JSON `tools/capture-assertion.html` saves after step 1 works as it is). **The first one is
+   (the JSON `tools/capture-assertion.html` saves after step 1 works as it is; the second one is
+   gated, so start `node tools/assertion-relay.mjs .assertions register` before you run it). **The first one is
    the real device, and it is the bootstrap**: the admin registers it alone, because nothing exists
    yet to sign for it. That is the one act of trust in the design; do it on a machine you trust. The
    second is a second device or a recovery credential kept somewhere else, and it needs a signature
@@ -193,7 +199,8 @@ preflight checks and the rule that is applied are the same file.
 ## Rehearsing without a phone
 
 Every script that wants a face scan prints `challenge: <base64>` and the path it will read the
-assertion from, then polls for that file. A person makes the file with `tools/capture-assertion.html`;
+assertion from, then polls for that file. A person makes the file with `tools/capture-assertion.html` served by
+`tools/assertion-relay.mjs`, which writes it where the script waits;
 `tools/drive-software-credential.sh <key.jwk> <logfile>` makes the same file with a software
 credential, so the script cannot tell them apart and the path is the same. Run the script with its
 output in a file and the driver beside it:

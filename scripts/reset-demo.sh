@@ -37,6 +37,8 @@
 #      saying every 10 seconds what it is waiting for and for how long it has been,
 #   4. calls set_rule as the admin and renames the file `.used`.
 # Make the file with tools/capture-assertion.html: paste the challenge, press Sign, save the JSON.
+# Serve that page with `node tools/assertion-relay.mjs` and the page can send the capture back
+# itself, which is the only practical route when the browser is not on this machine.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -180,7 +182,8 @@ for ((i = 0; i < steps; i++)); do
   echo "  challenge: $challenge"
   echo "  1. open tools/capture-assertion.html (HTTPS or localhost) on the device that holds the credential"
   echo "  2. paste the challenge, press Sign, unlock with your face or fingerprint"
-  echo "  3. save the JSON it prints as: $file"
+  echo "  3. press \"Send to the waiting script\", or save the JSON it prints as: $file"
+  echo "     (Send needs the page served by: node tools/assertion-relay.mjs $DIR $NODE)"
 
   waited=0
   while true; do

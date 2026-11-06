@@ -78,7 +78,8 @@ else
   echo "  registering: $NEWID"
   echo "  challenge:   $challenge"
   echo "  1. open tools/capture-assertion.html on the device that holds $signer"
-  echo "  2. paste the challenge, press Sign, unlock, and save the JSON as: $file"
+  echo "  2. paste the challenge, press Sign, unlock, then press \"Send to the waiting script\""
+  echo "     (Send needs: node tools/assertion-relay.mjs $DIR register), or save the JSON as: $file"
   waited=0
   while true; do
     if [[ -s $file ]] && jq -e . "$file" >/dev/null 2>&1; then

@@ -92,7 +92,14 @@ step: whoever registers a credential vouches that it is a real authenticator.</p
   <p class="lede">Save this as <code>assertion_valid.json</code>, or pass the five
   <code>probe_verify</code> fields straight to the contract.</p>
   <pre id="out" hidden></pre>
+  <button id="send" hidden>Send to the waiting script</button>
   <button id="copy" class="secondary" hidden>Copy JSON</button>
+  <div class="status" id="send-status"></div>
+  <p class="lede">Send works when this page is served by <code>tools/assertion-relay.mjs</code>
+  rather than a plain static server: the capture is POSTed back and written where
+  <code>scripts/reset-demo.sh</code> is already waiting for it. That matters when the browser
+  and the script are on different machines, which is the normal case over an SSH tunnel. With
+  a plain static server the button reports that nothing is listening; copy the JSON instead.</p>
 </section>
 
 <script>
@@ -314,8 +321,29 @@ $("assert").addEventListener("click", async () => {
     $("out").hidden = false;
     $("out").textContent = JSON.stringify(fixture, null, 2);
     $("copy").hidden = false;
+    $("send").hidden = false;
   } catch (e) {
     setStatus("sig-status", "signing failed: " + e, "err");
+  }
+});
+
+$("send").addEventListener("click", async () => {
+  setStatus("send-status", "sending...", "");
+  try {
+    const res = await fetch("/save", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: $("out").textContent,
+    });
+    const text = await res.text();
+    if (res.ok) {
+      setStatus("send-status", text + " — the script should pick it up within a second.", "ok");
+    } else {
+      setStatus("send-status", "the relay refused it (" + res.status + "): " + text, "err");
+    }
+  } catch (e) {
+    setStatus("send-status", "nothing answered /save (" + e +
+      "). This page is probably on a plain static server; copy the JSON instead.", "err");
   }
 });
 
