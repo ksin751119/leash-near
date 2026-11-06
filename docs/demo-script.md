@@ -38,9 +38,10 @@ The scripted rule on the budget node: **1.00 per payment, 2.00 per day**, payees
    REAL_DEVICE_CREDENTIAL_ID=<id> scripts/preflight.sh
    ```
 
-   The last check is a human one. The contract cannot tell a phone's secure enclave from a script's
-   key, so the script only checks that the credential you name is registered and has had an
-   assertion verified on chain; that it was a real device is your word. If you made the
+   The last check is partly a human one. The contract cannot tell a phone's secure enclave from a script's
+   key. The script reads from the chain that the credential you name was registered first
+   (sequence 0, the only one the admin key can add alone) and has had an assertion verified; that
+   it is a real device is your word, and the output labels it as yours. If you made the
    credential with `tools/make-fixtures.mjs` or `tools/software-credential.mjs`, it is not.
 5. Open the page. The budget bar should show 2.00 left of 2.00.
 
@@ -133,6 +134,12 @@ holder of a registered credential signed this exact challenge and that the authe
 user verification. It cannot prove the credential is hardware-backed, because there is no
 attestation; so it is only as strong as registration: the first credential is registered by the admin alone, and every later one needs a signature from one that already exists.
 
+**Say "cannot steal", never "cannot hurt".** A stolen admin key cannot widen a rule, withdraw, or
+register a credential of its own. It can still tighten, pause, remove payees, and remove
+credentials, and removing every credential strands the funds for good (nothing can replace them,
+and the withdrawal needs one). So the line is: "an attacker with the admin key cannot take the
+money", and if asked about the rest, say plainly that it can freeze it.
+
 ## If something goes wrong
 
 | What you see | What it means | What to do |
@@ -165,7 +172,7 @@ What the scripts cover and what they do not. Names below are the ones in `deploy
    secret goes in `~/.leash-testnet/akf-<name>.json`, mode 600.
 5. Freeze the wallet: `scripts/freeze.sh <wallet> testnet --yes-i-mean-it`. Irreversible.
 6. Record the accounts in `deployments/testnet.json` (including `funded_wallet_balance`, the base
-   units you funded the wallet with, and `credentials`: `[{"id": ..., "kind": "DEVICE ..." or "SOFTWARE ..."}]` for every registered credential **in the order they were registered, real device first**; preflight refuses anything else, because the first credential is the only one the admin key can add alone) and `agent/vendors.json`. The tests read both files, so nothing else needs editing.
+   units you funded the wallet with, and `credentials`: `[{"id": ..., "kind": "DEVICE ..." or "SOFTWARE ..."}]` for every registered credential for every registered credential; preflight needs the labels, but takes the registration order from the chain and requires the real device to be sequence 0, because the first credential is the only one the admin key can add alone) and `agent/vendors.json`. The tests read both files, so nothing else needs editing.
 7. Run the test suites, then the steps under "Before you record".
 
 The first rule for the budget node is applied by `reset-demo.sh`, not by hand, so the rule

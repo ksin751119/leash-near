@@ -119,7 +119,8 @@ rot silently. Run any one with `cargo test <test_name>` (Rust) or `node --test <
 | Preflight names the agent process that does not answer. | `scripts/preflight.test.mjs::"an agent process that does not answer is named, and the other is not"` |
 | Preflight requires two credentials, and a named real-device credential that has had an assertion verified. | `scripts/preflight.test.mjs::"two credentials are required"`, `scripts/preflight.test.mjs::"the human gate: unnamed, unregistered, the software credential, never used, and a real use"` |
 | Whichever single chain read fails or comes back incomplete, preflight still finishes, names the failure and is not ready; with no endpoint at all no chain check passes. | `scripts/preflight.test.mjs::"whichever single read fails, preflight still finishes, says so, and is not ready"`, `scripts/preflight.test.mjs::"when no endpoint answers every chain check fails, none passes"` |
-| Preflight requires the real device to be the FIRST credential registered (the only one the admin key can add alone), and says why the order matters. | `scripts/preflight.test.mjs::"the real device must be the FIRST credential registered, and the output says why the order matters"` |
+| The contract stamps every credential with its registration order (the bootstrap is sequence 0), never reuses a number, and ignores a registrant's own. | `tests-sandbox/tests/sandbox/rules.rs::the_chain_records_which_credential_was_registered_first` |
+| Preflight reads that order from the chain and requires sequence 0 to be the credential named as the real device; a deployment file's order proves nothing. | `scripts/preflight.test.mjs::"the real device must be the FIRST credential registered, and the order is read from the chain"` |
 | The human gate cannot go quiet: a deployment file that does not describe the registered credentials fails it. | `scripts/preflight.test.mjs::"a credential the deployment file does not describe makes the gate fail, never go quiet"` |
 | Registering a credential from the script follows the contract's rule: bootstrap by the admin, later ones signed. | `scripts/register-credential.test.mjs::"a later credential needs a signature from a registered one, and waits for it saying so"` |
 | A demo reset costs one face scan per widening step, none for a tightening, and never reuses an assertion. | `scripts/reset-demo.test.mjs::"scripted rule but money spent: a widening to reopen the window, then a tightening with no prompt"`, `scripts/reset-demo.test.mjs::"a stale assertion left in the directory is moved aside, not reused"` |
@@ -137,9 +138,10 @@ that first registration is the one act of trust in the design: it is made by the
 nothing exists yet to sign for it. Every later credential needs the admin **and** a signature from a
 credential that is already registered, over exactly the new key, so the admin key cannot add one on
 its own. Even a genuine device does not prove a unique person: anyone enrolled on it satisfies the
-check. This is why `scripts/preflight.sh` has a human gate before recording: it checks that the
-credential you name has had an assertion verified on chain, and the claim that the device is real is
-yours.
+check. This is why `scripts/preflight.sh` has a human gate before recording: it reads from the chain that
+the credential you name was registered first (sequence 0, the bootstrap) and has had assertions
+verified. **The chain proves which credential was first; only a person can vouch that it is a real
+device.** That one claim is yours.
 
 ### What a stolen admin key can and cannot do
 
@@ -223,7 +225,7 @@ Last run, on this branch:
 
 | Command | Result |
 | --- | --- |
-| `cargo test` | 215 passed, 0 failed: 119 contract unit tests, 96 sandbox tests (frozen account 3, concurrency 4, keys 8, rules 44, spend 22, token 1, passkey verification 2, withdraw 12) |
+| `cargo test` | 216 passed, 0 failed: 119 contract unit tests, 97 sandbox tests (frozen account 3, concurrency 4, keys 8, rules 45, spend 22, token 1, passkey verification 2, withdraw 12) |
 | `node --test agent/*.test.mjs web/*.test.mjs scripts/*.test.mjs` | 303 passed, 0 failed, 0 skipped: 256 in `agent/` and `web/`, 47 in `scripts/` |
 
 To see a gas figure: `cargo test --test spend -- --nocapture` (also `rules`, `widen_requires_passkey`,

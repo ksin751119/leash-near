@@ -48,6 +48,8 @@ export const goodWorld = () => ({
     [`${WALLET}.node_record`]: () => ({ rule: scriptedRule(), epoch: 1, version: 1, window_began_ms: Date.now() - 60_000, spent: "0" }),
     [`${WALLET}.is_paused`]: () => false,
     [`${WALLET}.credential_ids`]: () => [REAL, SOFT],
+    // Registration order as the contract stamps it: the bootstrap is sequence 0.
+    [`${WALLET}.credentials`]: () => [{ id: REAL, seq: 0 }, { id: SOFT, seq: 1 }],
     [`${WALLET}.credential_nonce`]: () => 2,
     [`${TOKEN}.ft_balance_of`]: () => "500000000",
     [`${TOKEN}.ft_metadata`]: () => ({ decimals: 6, symbol: "USDC" }),

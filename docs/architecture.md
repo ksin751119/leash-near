@@ -82,7 +82,7 @@ challenge and that the authenticator asserted user verification. It cannot prove
 hardware-backed (there is no attestation, and synced passkeys attest `none`), so the guarantee is
 only as strong as registration. The first credential is registered by the admin alone (the
 bootstrap, the one unavoidable act of trust); every later one needs the admin and an assertion from a
-registered credential, under its own action tag over the new key. Otherwise a stolen admin key could
+registered credential, under its own action tag over the new key. Each credential is stamped with its registration order (the bootstrap is sequence 0, numbers are never reused), which is how preflight reads "who was first" from the chain. Otherwise a stolen admin key could
 mint its own credential and sign a widening with it. Removal is ungated, so losing every credential
 strands the funds. See the README for the full wording.
 

@@ -753,6 +753,43 @@ async fn removing_every_credential_does_not_reopen_the_bootstrap() -> anyhow::Re
     Ok(())
 }
 
+/// The chain, not a deployment file, says which credential was registered first: the contract
+/// stamps each registration with its order, the bootstrap is 0, and a number is never reused even
+/// after the credential that held it is removed.
+#[tokio::test]
+async fn the_chain_records_which_credential_was_registered_first() -> anyhow::Result<()> {
+    let fx = deploy_with_token().await?;
+    let keys: Vec<Passkey> = (0..4).map(|i| Passkey::new(&format!("phone {i}"))).collect();
+    register(&fx, &keys[0]).await?; // the bootstrap
+    register_passkey_via(&fx, &keys[0], &keys[1]).await?;
+    register_passkey_via(&fx, &keys[0], &keys[2]).await?;
+    remove_credential(&fx, &fx.admin, &keys[1]).await?.into_result()?;
+    register_passkey_via(&fx, &keys[0], &keys[3]).await?;
+
+    let all: Vec<serde_json::Value> = fx.wallet.view("credentials").await?.json()?;
+    let seq_of = |pk: &Passkey| {
+        let id = STANDARD.encode(&pk.credential_id);
+        all.iter().find(|c| c["id"] == json!(id)).map(|c| c["seq"].as_u64().expect("seq is a number"))
+    };
+    println!("registration order on chain: {:?}", keys.iter().map(|k| seq_of(k)).collect::<Vec<_>>());
+    assert_eq!(seq_of(&keys[0]), Some(0), "the bootstrap credential is sequence 0");
+    assert_eq!(seq_of(&keys[1]), Some(1));
+    assert_eq!(seq_of(&keys[2]), Some(2));
+    assert_eq!(seq_of(&keys[3]), Some(3), "a removed credential's number is not handed out again");
+    let zeros = all.iter().filter(|c| c["seq"] == json!(0)).count();
+    assert_eq!(zeros, 1, "exactly one credential is the bootstrap");
+
+    // A registrant cannot choose its own sequence.
+    let sneaky = Passkey::new("sneaky");
+    let mut args = sneaky.registration();
+    args["cred"]["seq"] = json!(0);
+    args["assertion"] = json!(sign_registration(&fx, &keys[0], &sneaky).await?);
+    fx.admin.call(fx.wallet.id(), "register_credential").args_json(args).max_gas().transact().await?.into_result()?;
+    let all: Vec<serde_json::Value> = fx.wallet.view("credentials").await?.json()?;
+    assert_eq!(all.iter().filter(|c| c["seq"] == json!(0)).count(), 1, "a supplied seq must be ignored");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------------------
 // The epoch and the ledger
 // ---------------------------------------------------------------------------------------

@@ -160,6 +160,10 @@ pub struct Credential {
     pubkey_sec1: Vec<u8>,
     nonce: u64,
     revoked: bool,
+    /// Registration order, assigned by the contract: 0 for the bootstrap credential (the only one
+    /// the admin registers alone), then 1, 2, ... Tombstones are never deleted, so a number is
+    /// never reused. It is what lets a preflight read "which credential was first" from the chain.
+    seq: u64,
 }
 
 impl Credential {
@@ -172,6 +176,7 @@ impl Credential {
             pubkey_sec1,
             nonce,
             revoked: false,
+            seq: 0,
         })
     }
 
@@ -181,6 +186,17 @@ impl Credential {
 
     pub fn pubkey_sec1(&self) -> &[u8] {
         &self.pubkey_sec1
+    }
+
+    /// Registration order; see the field. Set by `register_credential`, never by the caller.
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+
+    /// The contract stamps the order itself; a registrant's own value is never trusted.
+    pub fn with_seq(mut self, seq: u64) -> Self {
+        self.seq = seq;
+        self
     }
 
     pub fn nonce(&self) -> u64 {

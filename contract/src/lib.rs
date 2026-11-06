@@ -202,6 +202,9 @@ impl LeashAccount {
     ///   nonce. A stolen admin key therefore cannot mint itself a credential and then widen a
     ///   rule or withdraw: it would need a signature from a passkey it does not hold.
     ///
+    /// Each credential carries a registration sequence stamped here (bootstrap = 0, never reused),
+    /// exposed by the `credentials` view, so "which credential was first" is a chain fact.
+    ///
     /// The flip side is deliberate: [`Self::remove_credential`] stays ungated (removal is
     /// tightening), so if every credential is lost or revoked nobody can register another and the
     /// funds are stuck. Register two before relying on this.
@@ -240,7 +243,10 @@ impl LeashAccount {
                 &register_payload(cred.id(), cred.pubkey_sec1(), cred.nonce()),
             );
         }
-        self.state.insert_credential(cred);
+        // Stamped by the contract: the count of every credential ever registered, revoked ones
+        // included, so the bootstrap is 0 and no number repeats.
+        let seq = self.state.all_credentials().len() as u64;
+        self.state.insert_credential(cred.with_seq(seq));
     }
 
     /// The 32 bytes a registered credential must sign to authorise `register_credential(cred)`,

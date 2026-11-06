@@ -154,10 +154,8 @@ test("the human gate: unnamed, unregistered, the software credential, never used
   r = await run(() => {}, { env: { REAL_DEVICE_CREDENTIAL_ID: "nope==" } });
   assert.match(failing(r), /HUMAN GATE: REAL_DEVICE_CREDENTIAL_ID is not registered/);
   r = await run(() => {}, { env: { REAL_DEVICE_CREDENTIAL_ID: F.SOFT } });
-  assert.match(failing(r), /the FIRST credential registered is not the real device/, "naming the software one while the device is first");
-  const softFirst = join(dir, "dep-soft-first.json");
-  writeFileSync(softFirst, JSON.stringify({ ...F.deployment, credentials: [F.deployment.credentials[1], F.deployment.credentials[0]] }));
-  r = await run(() => {}, { env: { LEASH_DEPLOYMENT: softFirst, REAL_DEVICE_CREDENTIAL_ID: F.SOFT } });
+  assert.match(failing(r), /not the real device you named/, "naming the software one while the device is first");
+  r = await run((w) => { w.views[`${F.WALLET}.credentials`] = () => [{ id: F.REAL, seq: 1 }, { id: F.SOFT, seq: 0 }]; }, { env: { REAL_DEVICE_CREDENTIAL_ID: F.SOFT } });
   assert.match(failing(r), /recorded in .* as 'SOFTWARE P-256, shakedown only', not as a device/);
   r = await run((w) => { w.views[`${F.WALLET}.credential_nonce`] = () => 0; });
   assert.match(failing(r), /never produced an assertion the chain accepted/);
@@ -202,6 +200,7 @@ test("whichever single read fails, preflight still finishes, says so, and is not
     ["ft_metadata", (w) => { w.raw[`${F.TOKEN}.ft_metadata`] = boom; }, /decimals could not be read/],
     ["wallet keys", (w) => { w.raw[`keys:${F.WALLET}`] = { error: { code: -32000, message: "boom" } }; }, /wallet key list could not be read/],
     ["agent keys", (w) => { w.raw[`keys:${F.ALPHA}`] = { error: { code: -32000, message: "boom" } }; }, /alpha.* key list could not be read/],
+    ["credentials", (w) => { w.raw[`${F.WALLET}.credentials`] = boom; }, /did not say which credential was registered first/],
     ["gas price", (w) => { w.gasPriceBroken = true; }, /gas price could not be read/],
     ["node_record without a window", (w) => { w.views[`${F.WALLET}.node_record`] = () => ({ rule: F.scriptedRule(), epoch: 1, version: 1, spent: "0" }); }, /no usable window/],
     ["node_record without spent", (w) => { w.views[`${F.WALLET}.node_record`] = () => ({ rule: F.scriptedRule(), epoch: 1, version: 1, window_began_ms: Date.now() - 60000 }); }, /not usable numbers/],
@@ -220,19 +219,35 @@ test("whichever single read fails, preflight still finishes, says so, and is not
   }
 });
 
-test("the real device must be the FIRST credential registered, and the output says why the order matters", async () => {
-  const file = join(dir, "dep-order.json");
-  writeFileSync(file, JSON.stringify({ ...F.deployment, credentials: [...F.deployment.credentials].reverse() }));
-  const r = await run(() => {}, { env: { LEASH_DEPLOYMENT: file } });
+test("the real device must be the FIRST credential registered, and the order is read from the chain", async () => {
+  // The chain says the software credential was registered first.
+  let r = await run((w) => { w.views[`${F.WALLET}.credentials`] = () => [{ id: F.REAL, seq: 1 }, { id: F.SOFT, seq: 0 }]; });
   assert.equal(r.code, 1);
-  assert.match(failing(r), /the FIRST credential registered is not the real device/);
+  assert.match(failing(r), /FIRST credential registered on the chain \(sequence 0\) is SOFTWARE.*not the real device you named/);
   assert.match(failing(r), /only the first registration is admin-alone/);
   assert.match(failing(r), /redeploy, and register the device first/);
+  assert.match(failing(r), /is only a convenience for labels and is not evidence of anything/);
   assert.doesNotMatch(r.out, /READY to record/);
-  const ok = await run();
+
+  // A deployment file listing them in the wrong order proves nothing either way: the chain decides.
+  const file = join(dir, "dep-order.json");
+  writeFileSync(file, JSON.stringify({ ...F.deployment, credentials: [...F.deployment.credentials].reverse() }));
+  const ok = await run(() => {}, { env: { LEASH_DEPLOYMENT: file } });
+  assert.equal(ok.code, 0, ok.out);
   assert.match(ok.out, /READY to record/);
-  assert.match(ok.out, /only if the real device was registered FIRST/);
-  assert.match(ok.out, /is the first credential recorded/);
+  assert.match(ok.out, /is sequence 0 on the chain/);
+  assert.match(ok.out, /What the chain proved: .*registered FIRST/);
+  assert.match(ok.out, /What only a person can vouch: that it is a real device/);
+
+  // No sequence 0, or two, or an unreadable list: not an answer, so a failure.
+  for (const views of [() => [{ id: F.REAL, seq: 1 }], () => [{ id: F.REAL, seq: 0 }, { id: F.SOFT, seq: 0 }], () => []]) {
+    r = await run((w) => { w.views[`${F.WALLET}.credentials`] = views; });
+    assert.match(failing(r), /did not say which credential was registered first/);
+  }
+  r = await run((w) => { w.raw[`${F.WALLET}.credentials`] = { result: { error: "boom" } }; });
+  assert.equal(r.code, 1);
+  assert.match(failing(r), /did not say which credential was registered first/);
+  assert.doesNotMatch(r.out, /READY to record/);
 });
 
 test("a missing argument is an error of the script, not a default", async () => {

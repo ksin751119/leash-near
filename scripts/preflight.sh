@@ -324,13 +324,17 @@ if ids=$(view "$WALLET" credential_ids '{}'); then
     fail "HUMAN GATE: REAL_DEVICE_CREDENTIAL_ID is not registered on $WALLET" "named: $REAL_DEVICE_CREDENTIAL_ID" "registered: $(jq -c . <<<"$ids")"
   else
     kind=$(jq -r --arg c "$REAL_DEVICE_CREDENTIAL_ID" '.[] | select(.id == $c) | .kind // "unlabelled"' <<<"$records")
-    first=$(jq -r '.[0].id' <<<"$records")
-    if [[ $first != "$REAL_DEVICE_CREDENTIAL_ID" ]]; then
-      fail "HUMAN GATE: the FIRST credential registered is not the real device (the first in $DEPLOYMENT is $first, you named $REAL_DEVICE_CREDENTIAL_ID)" \
+    # The order comes from the chain: the contract stamps every registration with a sequence and the
+    # bootstrap, the only credential the admin key can register alone, is sequence 0.
+    first=$(view "$WALLET" credentials '{}' | jq -r '[.[] | select(.seq == 0)] | if length == 1 then .[0].id else empty end') || first=
+    if [[ -z $first ]]; then
+      fail "HUMAN GATE: the chain's credential list did not say which credential was registered first" "$(lasterr)"
+    elif [[ $first != "$REAL_DEVICE_CREDENTIAL_ID" ]]; then
+      fail "HUMAN GATE: the FIRST credential registered on the chain (sequence 0) is $first, not the real device you named ($REAL_DEVICE_CREDENTIAL_ID)" \
         "the order matters: only the first registration is admin-alone, every later one needs a signature from an existing credential" \
-        "so a software credential registered first is one the admin key made by itself, and everything registered after it is only as trustworthy as it is" \
-        "a deployment that bootstrapped the wrong credential cannot be repaired by adding the device second: redeploy, and register the device first" \
-        "(the file's order is your record of what happened; the chain does not expose registration order)"
+        "so the first credential is one the admin key chose by itself, and everything registered after it is only as trustworthy as it is" \
+        "if that one is not the real device the admin key holds a credential it minted: redeploy, and register the device first" \
+        "this order is read from the chain; $DEPLOYMENT is only a convenience for labels and is not evidence of anything"
     elif [[ $kind == *SOFTWARE* || $kind == unlabelled ]]; then
       fail "HUMAN GATE: the credential you named is recorded in $DEPLOYMENT as '$kind', not as a device" "that is a script's key (or an unlabelled one), not a device"
     elif ! nonce=$(view "$WALLET" credential_nonce "{\"credential_id\":\"$REAL_DEVICE_CREDENTIAL_ID\"}"); then
@@ -339,7 +343,7 @@ if ids=$(view "$WALLET" credential_ids '{}'); then
       fail "HUMAN GATE: the named credential has never produced an assertion the chain accepted (nonce '$nonce')" \
         "its first use is the set_rule in scripts/reset-demo.sh; run that with this credential's device"
     else
-      pass "HUMAN GATE: credential $REAL_DEVICE_CREDENTIAL_ID is the first credential recorded, is registered as '$kind', and has had $nonce assertion(s) verified on chain"
+      pass "HUMAN GATE: credential $REAL_DEVICE_CREDENTIAL_ID is sequence 0 on the chain (registered first), is labelled '$kind', and has had $nonce assertion(s) verified on chain"
       note "the chain verified the signatures; that the device is real is YOUR claim (REAL_DEVICE_CREDENTIAL_ID). Did the face scan happen on a phone or laptop, not a script?"
     fi
   fi
@@ -350,8 +354,8 @@ fi
 printf '\n%d checks, %d failed\n' "$CHECKS" "$FAILS"
 if [[ $FAILS -eq 0 ]]; then
   echo "READY to record."
-  echo "Reminder: this holds only if the real device was registered FIRST. The first credential is the only one the admin key can add alone;"
-  echo "every later one needs a signature from an existing credential. The order is as recorded in $DEPLOYMENT, not read from the chain."
+  echo "What the chain proved: the credential you named was registered FIRST (the only one the admin key can add alone), it is registered, and the chain verified assertions from it."
+  echo "What only a person can vouch: that it is a real device (a phone or laptop authenticator), not a script's key. The contract cannot tell."
   exit 0
 fi
 echo "NOT ready. Fix the FAIL lines above."; exit 1
