@@ -10,7 +10,7 @@ should show: [`docs/demo-script.md`](docs/demo-script.md).
 
 ## If you click a transaction link: a refusal is a successful transaction
 
-When Leash refuses a payment, the explorer shows a **green tick**. That is correct and deliberate.
+When Leash refuses a payment, the explorer shows a transaction that succeeded: no failed receipt, and a `leash: refused` log carrying the decision. That is correct and deliberate. The links in this project open [near.rocks](https://testnet.near.rocks), which shows every receipt with its logs and needs no browser gate.
 The contract answers a refused `spend` with `{"status":"refused","code":4,"reason":"payee is not
 on the allow-list"}` and returns normally, instead of panicking. A panic makes NEAR roll the whole
 transaction back, including the record of why, and the chain would be left with a failed

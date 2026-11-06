@@ -7,9 +7,13 @@
 // no sentence about a refusal is written in this file, because a second copy drifts and then
 // the screen lies.
 
-export const EXPLORER = "https://explorer.testnet.near.org";
-export const txUrl = (hash) => `${EXPLORER}/transactions/${hash}`;
-export const accountUrl = (id) => `${EXPLORER}/accounts/${id}`;
+// near.rocks, not explorer.testnet.near.org (a chooser page with no transaction on it) and not
+// nearblocks (Cloudflare-gated against headless browsers, so an AI judge cannot open it). near.rocks
+// renders without a gate and shows every receipt with its logs: "leash: allowed" or "leash: refused"
+// and the returned decision. It shows no green tick; it shows no failure.
+export const EXPLORER = "https://testnet.near.rocks";
+export const txUrl = (hash) => `${EXPLORER}/tx/${hash}`;
+export const accountUrl = (id) => `${EXPLORER}/account/${id}`;
 
 // NEAR account ids run to 64 characters. Short enough ones are printed whole: an id is
 // something a judge may want to compare with the explorer.
@@ -84,7 +88,7 @@ export function renderAction(a, reasons) {
         reason: a.reason ?? sentenceFor(a.code, reasons),
         note: "No money moved.",
         txNote: a.tx
-          ? "This transaction SUCCEEDED, and that is the point. The contract returns the refusal instead of reverting, so the decision and its reason stay on the chain. A reverted transaction would have left no record at all."
+          ? "This transaction SUCCEEDED, and that is the point. No receipt failed, and its log reads \"leash: refused\" with the reason. The contract returns the refusal instead of reverting, so the decision stays on the chain. A reverted transaction would have left no record at all."
           : null };
     case "failed":
       return { ...base, tone: "failed", label: "FAILED", moved: false,

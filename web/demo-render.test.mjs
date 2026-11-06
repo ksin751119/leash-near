@@ -91,7 +91,7 @@ test("a refusal renders the chain's sentence, its code, and no money moved", () 
 test("a refusal's link says the transaction succeeded and why that is the point", () => {
   const a = renderAction({ status: "refused", code: 4, tx: "TXHASH", understood: "u" }, REASONS);
   assert.equal(a.txUrl, txUrl("TXHASH"));
-  assert.match(a.txUrl, /^https:\/\/explorer\.testnet\.near\.org\/transactions\/TXHASH$/);
+  assert.match(a.txUrl, /^https:\/\/testnet\.near\.rocks\/tx\/TXHASH$/);
   assert.match(a.txNote, /succeeded/i);
   assert.match(a.txNote, /refus/i);
 });

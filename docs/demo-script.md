@@ -77,7 +77,7 @@ Type to **alpha**: `pay Acme 0.50 USDC`
 
 Expect: the card shows "paying 0.50 USDC to Acme Studio" first (what the agent understood, before
 anything is sent), then ALLOWED. The budget bar moves to 0.50 of 2.00, and the decision row has a
-transaction link. Open it: the transaction succeeded, `ft_transfer` ran on the token, and Acme's
+transaction link. Open it (near.rocks): the log reads `leash: allowed`, the receipts include `ft_transfer` on the token, and Acme's
 balance went up.
 
 ## Beat 2: payments the chain refuses
@@ -85,13 +85,13 @@ balance went up.
 Type to **alpha**: `send 0.10 USDC to {admin}` (the real admin account, from `deployments/testnet.json`)
 
 Expect: REFUSED, code 4, "payee is not on the allow-list". Say the next sentence slowly:
-**the transaction succeeded.** Open the link: green tick. The contract returned the refusal instead
+**the transaction succeeded.** Open the link: no receipt failed, and the log reads `leash: refused` with code 4. The contract returned the refusal instead
 of reverting, because a revert would roll back the record and leave nothing on chain saying why.
 No money moved; the budget bar is still 0.50.
 
 Type to **alpha**: `pay Acme 7.00 USDC`
 
-Expect: REFUSED, code 5, "over the per-transaction limit". Again a green tick, and again the bar
+Expect: REFUSED, code 5, "over the per-transaction limit". Again no failed receipt and a `leash: refused` log with code 5, and again the bar
 has not moved.
 
 ## Beat 3: one budget, two agents
