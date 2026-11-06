@@ -133,25 +133,50 @@ async fn an_agent_key_cannot_call_the_token_contract_directly() -> anyhow::Resul
     Ok(())
 }
 
+/// The attacks on frozen code: change it (deploy), add a way back in (add_key), remove the
+/// restriction's neighbours (delete_key), or remove the account (delete_account) — and move
+/// NEAR. All need a full-access key, which no one holds after the freeze, and the agent's
+/// function-call key is refused each time with `RequiresFullAccess`.
 #[tokio::test]
-async fn an_agent_key_cannot_add_keys_or_deploy_or_transfer() -> anyhow::Result<()> {
+async fn an_agent_key_cannot_add_keys_deploy_delete_or_transfer() -> anyhow::Result<()> {
     let (fx, agent) = frozen_with_key().await?;
+    let wallet = fx.wallet.id();
     let other = SecretKey::from_random(KeyType::ED25519).public_key();
-    let r = agent
-        .batch(fx.wallet.id())
-        .add_key(other, AccessKey::full_access())
-        .transact()
-        .await
-        .map_err(Into::into);
-    let text = refusal(r, &["RequiresFullAccess"]);
-    println!("agent key -> add_key(full access): {}", one_line(&text));
+    let own = agent.secret_key().public_key();
 
-    let r = agent
-        .transfer_near(fx.admin.id(), NearToken::from_yoctonear(1))
-        .await
-        .map_err(Into::into);
-    let text = refusal(r, &["RequiresFullAccess"]);
-    println!("agent key -> transfer NEAR: {}", one_line(&text));
+    let attempts: Vec<(&str, anyhow::Result<ExecutionFinalResult>)> = vec![
+        (
+            "add_key(full access)",
+            agent.batch(wallet).add_key(other, AccessKey::full_access()).transact().await.map_err(Into::into),
+        ),
+        (
+            "deploy",
+            agent.batch(wallet).deploy(&common::wasm()?).transact().await.map_err(Into::into),
+        ),
+        (
+            "delete_key (its own)",
+            agent.batch(wallet).delete_key(own).transact().await.map_err(Into::into),
+        ),
+        (
+            "delete_account",
+            agent.batch(wallet).delete_account(fx.admin.id()).transact().await.map_err(Into::into),
+        ),
+        (
+            "transfer NEAR",
+            agent
+                .transfer_near(fx.admin.id(), NearToken::from_yoctonear(1))
+                .await
+                .map_err(Into::into),
+        ),
+    ];
+    for (what, r) in attempts {
+        let text = refusal(r, &["RequiresFullAccess"]);
+        println!("agent key -> {what}: {}", one_line(&text));
+    }
+    // And the code is the code it was: the contract still answers.
+    assert_eq!(full_access_key_count(&fx.worker, wallet).await?, 0);
+    let admin: String = fx.wallet.view("get_admin").await?.json()?;
+    assert_eq!(admin, fx.admin.id().to_string());
     Ok(())
 }
 
@@ -167,6 +192,11 @@ async fn the_same_key_can_call_spend() -> anyhow::Result<()> {
         .transact()
         .await?;
     assert!(res.is_success(), "the agent key could not call spend: {res:#?}");
+    // Proof that `spend` actually RAN, not merely that the transaction landed: the contract's
+    // own answer, a refusal with code 1 (no rule for this caller).
+    let v: serde_json::Value = res.json()?;
+    assert_eq!(v["status"], "refused", "unexpected spend answer: {v}");
+    assert_eq!(v["code"], 1, "unexpected spend answer: {v}");
     Ok(())
 }
 
@@ -195,16 +225,55 @@ async fn rpc_shows_zero_full_access_keys_after_freeze() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The names of a wasm module's exports, read from its export section (id 7). Hand-parsed
+/// because the only alternative is a dependency for fifteen lines.
+fn wasm_exports(wasm: &[u8]) -> Vec<String> {
+    fn leb(b: &[u8], at: &mut usize) -> usize {
+        let (mut v, mut shift) = (0usize, 0);
+        loop {
+            let byte = b[*at];
+            *at += 1;
+            v |= ((byte & 0x7f) as usize) << shift;
+            if byte & 0x80 == 0 {
+                return v;
+            }
+            shift += 7;
+        }
+    }
+    assert_eq!(&wasm[..4], b"\0asm");
+    let mut at = 8;
+    while at < wasm.len() {
+        let id = wasm[at];
+        at += 1;
+        let size = leb(wasm, &mut at);
+        if id == 7 {
+            let mut p = at;
+            let count = leb(wasm, &mut p);
+            let mut names = Vec::new();
+            for _ in 0..count {
+                let n = leb(wasm, &mut p);
+                names.push(String::from_utf8(wasm[p..p + n].to_vec()).unwrap());
+                p += n;
+                p += 1; // export kind
+                leb(wasm, &mut p); // index
+            }
+            return names;
+        }
+        at += size;
+    }
+    panic!("no export section");
+}
+
 /// The contract must not grow a key-enumeration method; nothing on the host could back one.
+/// Compared against the module's real export list, not a grep of its bytes.
 #[tokio::test]
 async fn the_contract_exports_no_key_enumeration() -> anyhow::Result<()> {
-    let wasm = common::wasm()?;
-    for name in [&b"keys_report"[..], b"access_keys", b"list_keys", b"view_access_key_list"] {
-        assert!(
-            !wasm.windows(name.len()).any(|w| w == name),
-            "the wasm mentions {}",
-            String::from_utf8_lossy(name)
-        );
+    let exports = wasm_exports(&common::wasm()?);
+    println!("exports: {exports:?}");
+    assert!(exports.contains(&"spend".to_string()) && exports.contains(&"withdraw".to_string()));
+    assert!(exports.len() > 10, "export list looks wrong: {exports:?}");
+    for e in &exports {
+        assert!(!e.to_lowercase().contains("key"), "an export mentions keys: {e}");
     }
     Ok(())
 }
