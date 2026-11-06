@@ -476,4 +476,7 @@ Each is a README line under "what we would build next", with the reason.
 
 Whether the ADMIN key and the passkey credential should be allowed to be the same human in
 the demo. They are in practice (it is one person), but the narration should be explicit that
-they are separate *capabilities* — stolen ADMIN key alone cannot widen anything, withdraw, or register a credential of its own.
+they are separate *capabilities* — a stolen ADMIN key alone cannot widen anything, withdraw, or
+register a credential of its own. It can still remove credentials, and removing the last one strands
+the funds permanently: it cannot steal, but it can lock. The narration says "cannot steal", never
+"cannot hurt".

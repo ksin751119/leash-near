@@ -88,7 +88,7 @@ rot silently. Run any one with `cargo test <test_name>` (Rust) or `node --test <
 | Claim | Proved by |
 | --- | --- |
 | The first credential is registered by the admin alone and by nobody else; an agent's key cannot register one. | `tests-sandbox/tests/sandbox/rules.rs::register_credential_is_admin_only`, `tests-sandbox/tests/sandbox/rules.rs::an_agent_function_call_key_cannot_register_a_credential` |
-| **The admin key alone cannot register a second credential**, with no assertion or with a self-signed one, and so cannot widen a rule with a credential of its own. | `tests-sandbox/tests/sandbox/rules.rs::the_admin_key_alone_cannot_register_a_second_credential` |
+| **The admin key alone cannot register a second credential**, with no assertion or with a self-signed one, and so cannot widen a rule with a credential of its own. It can still *remove* credentials, and removing the last one strands the funds — it cannot steal, but it can lock. | `tests-sandbox/tests/sandbox/rules.rs::the_admin_key_alone_cannot_register_a_second_credential`, `tests-sandbox/tests/sandbox/rules.rs::removing_every_credential_does_not_reopen_the_bootstrap` |
 | A registered credential can authorise a second one, and the new one then works. | `tests-sandbox/tests/sandbox/rules.rs::a_registered_credential_can_authorise_a_second_one` |
 | A registration assertion binds the exact new id and key and works once. | `tests-sandbox/tests/sandbox/rules.rs::a_registration_assertion_binds_the_new_key_and_is_single_use`, `contract/src/challenge.rs::a_registration_challenge_has_its_own_tag_and_binds_the_new_key` |
 | A registration assertion cannot do anything else, and no other action's assertion can register. | `tests-sandbox/tests/sandbox/rules.rs::a_registration_assertion_cannot_do_anything_else_and_nothing_else_registers` |
@@ -148,9 +148,15 @@ device.** That one claim is yours.
 It **can** tighten any rule, pause the account or a budget, remove payees, and remove credentials. It
 **cannot** widen a rule, add a payee, unpause, withdraw, or mint itself a credential: each of those
 needs a signature from a registered passkey, and adding a passkey needs one too. Proved by
-`the_admin_key_alone_cannot_register_a_second_credential` and the loosening tests above. The one
-exception is time: before the first credential is registered, the admin key is the only thing that
-decides which key the gate will trust, so register it on a machine you trust.
+`the_admin_key_alone_cannot_register_a_second_credential` and the loosening tests above.
+
+**It cannot steal. It can still hurt.** Removing credentials is tightening, so it is ungated — and
+removing the last one strands the funds permanently, because withdrawal needs a passkey and a new
+credential needs a signature from an existing one. A stolen admin key cannot take the money; it can
+lock it away for good. Do not let "cannot steal" be heard as "cannot hurt".
+
+The other exception is time: before the first credential is registered, the admin key is the only
+thing that decides which key the gate will trust, so register it on a machine you trust.
 
 ### Lose every credential and the funds are stuck
 
