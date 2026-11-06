@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Delete every full-access key on the wallet account. After this the contract code can
-# never change again, for anyone, and the contract has no add_key: running this before
-# the agent function-call keys are in place bricks the wallet. IRREVERSIBLE.
+# never change again, for anyone, and nobody can add a key to the wallet. IRREVERSIBLE.
+# The agents' keys are not on the wallet (see grant-agent-key.sh: a key on the wallet signs AS
+# the wallet, and `spend` would not know which agent is calling), so freezing leaves the wallet
+# with no keys at all and does not interact with granting them.
 # Usage: scripts/freeze.sh <wallet-account> <testnet|mainnet> --yes-i-mean-it
 set -euo pipefail
 
@@ -34,14 +36,9 @@ function_call_count() { jq '[.[] | select(.access_key.permission | type == "obje
 
 BEFORE=$(list_keys) || { echo "could not read the key list for $WALLET from $RPC" >&2; exit 1; }
 
-if [ "$(echo "$BEFORE" | function_call_count)" -lt 1 ]; then
-  echo "refusing to run: $WALLET has no function-call key. Add the agent keys first, or the wallet is unusable." >&2
-  exit 1
-fi
-
 for PK in $(echo "$BEFORE" | full_access_keys); do
   echo "deleting full-access key $PK"
-  near account delete-key "$WALLET" "$PK" \
+  near account delete-keys "$WALLET" public-keys "$PK" \
     network-config "$NETWORK" sign-with-keychain send
 done
 
@@ -54,4 +51,4 @@ if [ -n "$REMAINING" ]; then
   exit 1
 fi
 
-echo "frozen: $WALLET has $(echo "$AFTER" | function_call_count) function-call key(s) and no full-access key"
+echo "frozen: $WALLET has no full-access key and $(echo "$AFTER" | function_call_count) function-call key(s)"

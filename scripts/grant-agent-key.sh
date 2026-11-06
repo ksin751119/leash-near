@@ -1,27 +1,39 @@
 #!/usr/bin/env bash
-# Give an agent its key on the wallet account: a function-call access key that can call
-# `spend` on the wallet and nothing else.
-# Usage: scripts/grant-agent-key.sh <wallet-account> <agent-public-key> <testnet|mainnet> [allowance-in-NEAR]
+# Give an agent its key: a function-call access key ON THE AGENT'S OWN ACCOUNT, with the wallet
+# as its receiver and `spend` as its only method.
+# Usage: scripts/grant-agent-key.sh <wallet-account> <agent-account> <agent-public-key> <testnet|mainnet> [allowance-in-NEAR]
+#
+# The key lives on the agent account, not on the wallet. `spend` identifies the caller by
+# `predecessor_id` and derives the budget node from it (`pay.ops.x` -> `ops.x`). A key added to
+# the WALLET signs as the wallet, so the contract would see the wallet as the caller, find no
+# node, and refuse every payment with code 1 ("no rule for this agent's node"). Verified on
+# testnet: that is the only answer such a key can ever get. A key on the agent account signs as
+# the agent, and the transaction's receiver (the wallet) is what the key is restricted to.
 #
 # The agent generates its own keypair and hands over only the PUBLIC key (`ed25519:...`), so
 # no secret passes through this script or its logs. A 64-byte secret key is refused.
 #
-# **Run this BEFORE scripts/freeze.sh.** Adding a key needs a full-access key on the wallet,
-# and freezing deletes them all; the contract has no add_key, so a missing agent key can never
-# be granted afterwards. The script checks and refuses on a frozen wallet.
+# The agent account must already exist (only its parent can create it) and its full-access key
+# must be in the near-cli keychain: that key signs the grant. Afterwards the script DELETES the
+# agent account's full-access keys, leaving the restricted key as the only way in, because an
+# agent that still holds a full-access key can do anything with its account. That makes the
+# account's own NEAR balance (it pays the gas) unrecoverable; set KEEP_FULL_ACCESS=1 to skip the
+# deletion. This has nothing to do with scripts/freeze.sh and may run before or after it.
 #
 # What the key can do is enforced by the NEAR protocol, not by this contract:
 #   receiver_id  = the wallet   -> it cannot call the token contract, or any other account
 #   method_names = ["spend"]    -> it cannot call set_rule, withdraw, add_payee, ...
 #   allowance    = small        -> gas it may burn is capped (default 0.25 NEAR)
 #   function-call keys cannot attach a deposit, add keys, deploy, or transfer NEAR
+# `spend` needs about 60 TGas attached: it reserves 35 TGas for its two promises up front, and
+# 30 TGas fails with "Exceeded the prepaid gas".
 # The sandbox tests (tests-sandbox/tests/sandbox/keys.rs) show each refusal.
 set -euo pipefail
 
 die() { echo "grant-agent-key.sh: $*" >&2; exit 1; }
 
-[[ $# -ge 3 && $# -le 4 ]] || die "usage: grant-agent-key.sh <wallet-account> <agent-public-key> <testnet|mainnet> [allowance-in-NEAR]"
-WALLET=$1 PUBKEY=$2 NETWORK=$3 ALLOWANCE=${4:-0.25}
+[[ $# -ge 4 && $# -le 5 ]] || die "usage: grant-agent-key.sh <wallet-account> <agent-account> <agent-public-key> <testnet|mainnet> [allowance-in-NEAR]"
+WALLET=$1 AGENT=$2 PUBKEY=$3 NETWORK=$4 ALLOWANCE=${5:-0.25}
 
 case "$NETWORK" in
   mainnet) RPC=https://rpc.mainnet.near.org ;;
@@ -54,14 +66,14 @@ rpc() { # <params-json> -> prints .result, fails on an RPC error
     | jq -e 'if .error then error(.error | tostring) else .result end'
 }
 
-# Granting needs a full-access key on the wallet. If there are none, it is frozen, and no key
-# can ever be added: say so before near-cli fails with something cryptic.
-full=$(rpc "{\"request_type\":\"view_access_key_list\",\"finality\":\"final\",\"account_id\":\"$WALLET\"}" \
-  | jq '[.keys[] | select(.access_key.permission == "FullAccess")] | length') \
-  || die "could not read $WALLET's access keys from $RPC"
-[[ $full -gt 0 ]] || die "wallet already frozen — grant agent keys before freezing. $WALLET has no full-access key left, so no key can be added to it, by anyone, ever."
+# Granting needs a full-access key on the agent account. Say so before near-cli fails with
+# something cryptic.
+keys=$(rpc "{\"request_type\":\"view_access_key_list\",\"finality\":\"final\",\"account_id\":\"$AGENT\"}" \
+  | jq -c '.keys') || die "could not read $AGENT's access keys from $RPC (does the account exist?)"
+full=$(jq '[.[] | select(.access_key.permission == "FullAccess")] | length' <<<"$keys")
+[[ $full -gt 0 ]] || die "$AGENT has no full-access key, so nothing can sign the grant (an agent account whose full-access keys are already deleted cannot be given another key)."
 
-near account add-key "$WALLET" grant-function-call-access \
+near account add-key "$AGENT" grant-function-call-access \
   --allowance "$ALLOWANCE NEAR" \
   --contract-account-id "$WALLET" \
   --function-names spend \
@@ -70,7 +82,7 @@ near account add-key "$WALLET" grant-function-call-access \
 
 # Read it back from the RPC rather than trusting the command: there is no contract view for
 # access keys, so the chain's own record is the only evidence.
-got=$(rpc "{\"request_type\":\"view_access_key\",\"finality\":\"final\",\"account_id\":\"$WALLET\",\"public_key\":\"$PUBKEY\"}" \
+got=$(rpc "{\"request_type\":\"view_access_key\",\"finality\":\"final\",\"account_id\":\"$AGENT\",\"public_key\":\"$PUBKEY\"}" \
   | jq -c '.permission.FunctionCall') || die "the key is not on chain after the grant"
 echo "on chain: $got"
 want_yocto=$(node -e '
@@ -79,3 +91,15 @@ want_yocto=$(node -e '
 jq -e --arg w "$WALLET" --arg a "$want_yocto" \
   '.receiver_id == $w and .method_names == ["spend"] and .allowance == $a' <<<"$got" >/dev/null \
   || die "the key on chain is NOT restricted as intended (wanted receiver $WALLET, methods [spend], allowance $want_yocto yocto)"
+
+if [[ -z ${KEEP_FULL_ACCESS:-} ]]; then
+  for PK in $(rpc "{\"request_type\":\"view_access_key_list\",\"finality\":\"final\",\"account_id\":\"$AGENT\"}" \
+    | jq -r '.keys[] | select(.access_key.permission == "FullAccess") | .public_key'); do
+    echo "deleting full-access key $PK from $AGENT"
+    near account delete-keys "$AGENT" public-keys "$PK" network-config "$NETWORK" sign-with-keychain send
+  done
+  left=$(rpc "{\"request_type\":\"view_access_key_list\",\"finality\":\"final\",\"account_id\":\"$AGENT\"}" \
+    | jq -c '[.keys[] | .public_key]')
+  [[ $left == "[\"$PUBKEY\"]" ]] || die "$AGENT should hold only $PUBKEY but holds $left"
+  echo "$AGENT holds only the restricted key"
+fi
