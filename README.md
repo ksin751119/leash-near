@@ -118,6 +118,7 @@ rot silently. Run any one with `cargo test <test_name>` (Rust) or `node --test <
 | Preflight fails unless the beats would come out as scripted, with the headroom for exactly them. | `scripts/preflight.test.mjs::"the rule must be the scripted one, with headroom for exactly the beats"` |
 | Preflight names the agent process that does not answer. | `scripts/preflight.test.mjs::"an agent process that does not answer is named, and the other is not"` |
 | Preflight requires two credentials, and a named real-device credential that has had an assertion verified. | `scripts/preflight.test.mjs::"two credentials are required"`, `scripts/preflight.test.mjs::"the human gate: unnamed, unregistered, the software credential, never used, and a real use"` |
+| Preflight checks that every payee, on the allow-list and in `vendors.json`, exists on chain and is registered on the token, names the broken account, says which list a mismatch runs from, and fails a wallet short of NEAR for storage. | `scripts/preflight.test.mjs::"every payee must exist, be registered on the token, and appear in both lists"`, `scripts/preflight.test.mjs::"the wallet must have NEAR for storage, and says why"` |
 | Whichever single chain read fails or comes back incomplete, preflight still finishes, names the failure and is not ready; with no endpoint at all no chain check passes. | `scripts/preflight.test.mjs::"whichever single read fails, preflight still finishes, says so, and is not ready"`, `scripts/preflight.test.mjs::"when no endpoint answers every chain check fails, none passes"` |
 | The contract stamps every credential with its registration order (the bootstrap is sequence 0), never reuses a number, and ignores a registrant's own. | `tests-sandbox/tests/sandbox/rules.rs::the_chain_records_which_credential_was_registered_first` |
 | Preflight reads that order from the chain and requires sequence 0 to be the credential named as the real device; a deployment file's order proves nothing. | `scripts/preflight.test.mjs::"the real device must be the FIRST credential registered, and the order is read from the chain"` |
@@ -232,7 +233,7 @@ Last run, on this branch:
 | Command | Result |
 | --- | --- |
 | `cargo test` | 216 passed, 0 failed: 119 contract unit tests, 97 sandbox tests (frozen account 3, concurrency 4, keys 8, rules 45, spend 22, token 1, passkey verification 2, withdraw 12) |
-| `node --test agent/*.test.mjs web/*.test.mjs scripts/*.test.mjs` | 303 passed, 0 failed, 0 skipped: 256 in `agent/` and `web/`, 47 in `scripts/` |
+| `node --test agent/*.test.mjs web/*.test.mjs scripts/*.test.mjs` | 306 passed, 0 failed, 0 skipped: 256 in `agent/` and `web/`, 50 in `scripts/` |
 
 To see a gas figure: `cargo test --test spend -- --nocapture` (also `rules`, `widen_requires_passkey`,
 `withdraw`). The fixtures under `tests-sandbox/tests/fixtures/` are generated, not browser-captured

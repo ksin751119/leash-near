@@ -160,9 +160,11 @@ What the scripts cover and what they do not. Names below are the ones in `deploy
    the budget node, created by it with `fund-myself` (`alpha.<budget-node>`, `beta.<budget-node>`).
    The admin must differ from the wallet. Two things bit the rehearsal: the faucet answers
    `429 Too Many Requests` after a handful of accounts in a minute (create them one at a time, the
-   wallet first, and retry later rather than in a loop), and the wallet must be a faucet account
+   wallet first, **the day before recording**, and retry later rather than in a loop), and the wallet must be a faucet account
    with its own 10 NEAR, because the contract's 707 KB wasm needs about 7.1 NEAR of storage. A
-   sub-account funded from the admin's leftovers cannot hold it.
+   sub-account funded from the admin's leftovers cannot hold it. Preflight checks the wallet's NEAR
+   (storage locked plus 0.1 spare) and that every payee exists and is registered on the token, and
+   that `agent/vendors.json` and the node's allow-list name the same payees.
 2. Build and deploy (`. "$HOME/.cargo/env"` first; `deploy.sh` calls cargo): `scripts/build-contract.sh test-token` and deploy it to the token account with
    `new {owner_id, total_supply, decimals: 6}`, then `storage_deposit` (0.00125 NEAR) for the wallet and every payee
    and `ft_transfer` the funding amount to the wallet (attach `1 yoctoNEAR`). Then `scripts/deploy.sh <wallet> <admin> <token> testnet`.

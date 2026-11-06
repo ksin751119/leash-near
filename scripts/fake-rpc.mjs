@@ -52,7 +52,15 @@ export const goodWorld = () => ({
     [`${WALLET}.credentials`]: () => [{ id: REAL, seq: 0 }, { id: SOFT, seq: 1 }],
     [`${WALLET}.credential_nonce`]: () => 2,
     [`${TOKEN}.ft_balance_of`]: () => "500000000",
+    // Registered storage on the token; null for an account that never paid the deposit.
+    [`${TOKEN}.storage_balance_of`]: ({ account_id }) => ([WALLET, PAY1, PAY2].includes(account_id) ? { total: "1250000000000000000000", available: "0" } : null),
     [`${TOKEN}.ft_metadata`]: () => ({ decimals: 6, symbol: "USDC" }),
+  },
+  // view_account answers: amount in yocto and storage_usage in bytes. A missing account does not exist.
+  accounts: {
+    [WALLET]: { amount: "10000000000000000000000000", storage_usage: 707000 },
+    [PAY1]: { amount: "1000000000000000000000000", storage_usage: 300 },
+    [PAY2]: { amount: "1000000000000000000000000", storage_usage: 300 },
   },
   rateLimitFirst: false,
   raw: {}, // "<account>.<method>" or "keys:<account>" -> a raw JSON-RPC body to return instead
@@ -76,6 +84,12 @@ export function startRpc(world) {
         if (raw) return reply(raw);
         const keys = world.keys[p.account_id];
         return keys ? reply({ result: { keys } }) : reply({ error: { code: -32000, message: `unknown account ${p.account_id}` } });
+      }
+      if (p.request_type === "view_account") {
+        if (world.raw[`account:${p.account_id}`]) return reply(world.raw[`account:${p.account_id}`]);
+        const a = world.accounts[p.account_id];
+        return a ? reply({ result: { ...a, locked: "0", code_hash: "x", block_height: 1 } })
+                 : reply({ error: { code: -32000, message: `account ${p.account_id} does not exist while viewing` } });
       }
       if (p.request_type === "call_function") {
         const key = `${p.account_id}.${p.method_name}`;

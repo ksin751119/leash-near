@@ -199,6 +199,39 @@ else
     if [[ -z $diffs ]]; then pass "the rule on $NODE is the scripted rule (per-tx $(fmt "$(jq -r .rule.per_tx_limit <<<"$rec")"), period $(fmt "$limit"), payees $(jq -c '.payees | length' <<<"$have_rule"), not paused)"
     else fail "the rule on $NODE is not the scripted rule" "$diffs"; fi
 
+    # ---- the payees: they exist, they can receive the token, and the two lists agree --------
+    # A payee that is on the allow-list but does not exist, or has no storage on the token, fails an
+    # allowed payment for a reason that has nothing to do with policy, which on camera looks like a
+    # broken product. And a vendors.json that disagrees with the allow-list makes the agents
+    # name payees the chain refuses (or cannot be named at all).
+    allow=$(jq -c '.rule.payees | sort' <<<"$rec")
+    vend=$(jq -c '[.[].account] | sort' "$VENDORS")
+    only_vendors=$(jq -nr --argjson a "$allow" --argjson v "$vend" '$v - $a | .[]')
+    only_allow=$(jq -nr --argjson a "$allow" --argjson v "$vend" '$a - $v | .[]')
+    if [[ -z $only_vendors && -z $only_allow ]]; then
+      pass "$VENDORS and the node's allow-list name the same $(jq length <<<"$allow") payees"
+    else
+      mism=()
+      for a in $only_vendors; do mism+=("in $VENDORS but NOT on the node's allow-list: $a (the demo would ask the agent to pay it and the chain would refuse, code 4)"); done
+      for a in $only_allow; do mism+=("on the node's allow-list but NOT in $VENDORS: $a (allowed on chain, but the agents have no name for it)"); done
+      fail "$VENDORS and the node's allow-list disagree" "${mism[@]}"
+    fi
+    for acct in $(jq -nr --argjson a "$allow" --argjson v "$vend" '$a + $v | unique | .[]'); do
+      if ! body=$(rpc query "{\"request_type\":\"view_account\",\"finality\":\"final\",\"account_id\":\"$acct\"}"); then
+        fail "payee $acct: could not check that it exists" "$(lasterr)"; continue
+      fi
+      if ! jq -e '.result.amount != null' <<<"$body" >/dev/null 2>&1; then
+        fail "payee $acct does not exist on chain" "$(jq -c '.error // .result.error // .result' <<<"$body" | cut -c1-160)" "a payment to it would fail at the token, not at the policy"; continue
+      fi
+      if ! sb=$(view "$TOKEN" storage_balance_of "{\"account_id\":\"$acct\"}"); then
+        fail "payee $acct: its storage on the token could not be read" "$(lasterr)"; continue
+      fi
+      if [[ $sb == null ]] || ! digits "$(jq -r '.total // empty' <<<"$sb")" || [[ $(jq -r '.total' <<<"$sb") == 0 ]]; then
+        fail "payee $acct exists but has no storage registered on the token $TOKEN" "storage_deposit it on the token (the contract does this for payees it adds, not for accounts it did not add)"; continue
+      fi
+      pass "payee $acct exists and is registered on the token"
+    done
+
     # is_paused is the account-wide switch, separate from the rule's own flag.
     if p=$(view "$WALLET" is_paused '{}'); then
       [[ $p == false ]] && pass "the account-wide pause is off" || fail "the account is paused (is_paused = $p); unpausing needs a passkey assertion"
@@ -251,6 +284,21 @@ else
       else fail "the beats would not come out as scripted" "${bad[@]}"; fi
     fi
   fi
+fi
+
+# ---- 3b. the wallet's own NEAR -----------------------------------------------------------------
+# The contract's wasm is about 707 KB, roughly 7.1 NEAR of locked storage; a wallet funded with less
+# fails deploy, or later fails a storage deposit for a payee, with a confusing storage error.
+SPARE_NEAR=0.1
+if ! body=$(rpc query "{\"request_type\":\"view_account\",\"finality\":\"final\",\"account_id\":\"$WALLET\"}"); then
+  fail "the wallet's NEAR balance could not be read" "$(lasterr)"
+elif ! amount=$(jq -er '.result.amount' <<<"$body" 2>/dev/null) || ! usage=$(jq -er '.result.storage_usage' <<<"$body" 2>/dev/null) || ! digits "$amount" || ! digits "$usage"; then
+  fail "the wallet's account record has no usable amount or storage_usage" "$(jq -c '.error // .result' <<<"$body" | cut -c1-160)"
+else
+  read -r have locked spare ok <<<"$(awk -v a="$amount" -v u="$usage" -v s="$SPARE_NEAR" 'BEGIN { l = u * 1e19; printf "%.3f %.3f %.3f %d", a / 1e24, l / 1e24, (a - l) / 1e24, ((a - l) / 1e24 >= s) }')"
+  if [[ $ok -eq 1 ]]; then pass "the wallet holds $have NEAR, $locked locked for storage, $spare spare (needs at least $SPARE_NEAR for payee deposits and gas)"
+  else fail "the wallet holds $have NEAR and its code and state lock $locked, leaving $spare; it needs at least $SPARE_NEAR spare" \
+    "the wasm is about 707 KB, roughly 7.1 NEAR of storage, so a wallet needs its own faucet 10 NEAR (or a top-up from the admin)"; fi
 fi
 
 # ---- 4. the token balance --------------------------------------------------------------------

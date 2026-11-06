@@ -250,6 +250,52 @@ test("the real device must be the FIRST credential registered, and the order is 
   assert.doesNotMatch(r.out, /READY to record/);
 });
 
+test("every payee must exist, be registered on the token, and appear in both lists", async () => {
+  const GHOST = "leash-ghost.testnet";
+  // A payee that is on the allow-list and in vendors.json but is not an account.
+  let r = await run((w) => { delete w.accounts[F.PAY2]; });
+  assert.equal(r.code, 1);
+  assert.match(failing(r), new RegExp(`payee ${F.PAY2} does not exist on chain`));
+  assert.doesNotMatch(failing(r), new RegExp(`payee ${F.PAY1}`), "only the broken one is named");
+  // An account with no storage on the token.
+  r = await run((w) => { const f = w.views[`${F.TOKEN}.storage_balance_of`]; w.views[`${F.TOKEN}.storage_balance_of`] = (a) => (a.account_id === F.PAY1 ? null : f(a)); });
+  assert.match(failing(r), new RegExp(`payee ${F.PAY1} exists but has no storage registered on the token`));
+  // storage_balance_of unreadable, and view_account unreadable: failures, never skips.
+  r = await run((w) => { w.raw[`${F.TOKEN}.storage_balance_of`] = { result: { error: "boom" } }; });
+  assert.match(failing(r), /its storage on the token could not be read/);
+  r = await run((w) => { w.raw[`account:${F.PAY1}`] = { error: { code: -32000, message: "boom" } }; });
+  assert.match(failing(r), new RegExp(`payee ${F.PAY1} does not exist on chain|could not check that it exists`));
+  // A vendor the allow-list does not have: the demo would ask for a payment the chain refuses.
+  const vend = join(dir, "vendors-extra.json");
+  writeFileSync(vend, JSON.stringify([...F.vendors, { id: "pay3", name: "Ghost", aliases: [], account: GHOST }]));
+  r = await run((w) => { w.accounts[GHOST] = w.accounts[F.PAY1]; w.views[`${F.TOKEN}.storage_balance_of`] = ({ account_id }) => ({ total: "1", available: "0" }); }, { env: { AGENT_VENDORS: vend } });
+  assert.match(failing(r), new RegExp(`in .*vendors-extra.json but NOT on the node's allow-list: ${GHOST}`));
+  // An allow-list payee vendors.json does not know.
+  r = await run((w) => {
+    w.accounts[GHOST] = w.accounts[F.PAY1];
+    w.views[`${F.TOKEN}.storage_balance_of`] = () => ({ total: "1", available: "0" });
+    w.views[`${F.WALLET}.node_record`] = () => ({ rule: { ...F.scriptedRule(), payees: [F.PAY1, F.PAY2, GHOST] }, epoch: 1, version: 1, window_began_ms: Date.now() - 60000, spent: "0" });
+  });
+  assert.match(failing(r), new RegExp(`on the node's allow-list but NOT in .*vendors.json: ${GHOST}`));
+  // And the healthy world says all of it passed.
+  r = await run();
+  assert.match(r.out, /name the same 2 payees/);
+  assert.match(r.out, new RegExp(`PASS  payee ${F.PAY1} exists and is registered on the token`));
+});
+
+test("the wallet must have NEAR for storage, and says why", async () => {
+  let r = await run((w) => { w.accounts[F.WALLET] = { amount: "6000000000000000000000000", storage_usage: 707000 }; });
+  assert.equal(r.code, 1);
+  assert.match(failing(r), /the wallet holds 6\.000 NEAR and its code and state lock 7\.070/);
+  assert.match(failing(r), /roughly 7\.1 NEAR of storage/);
+  r = await run((w) => { delete w.accounts[F.WALLET]; });
+  assert.match(failing(r), /the wallet's NEAR balance could not be read|no usable amount/);
+  r = await run((w) => { w.raw[`account:${F.WALLET}`] = { result: { amount: "not a number" } }; });
+  assert.match(failing(r), /no usable amount or storage_usage/);
+  r = await run();
+  assert.match(r.out, /PASS  the wallet holds 10\.000 NEAR, 7\.070 locked for storage, 2\.930 spare/);
+});
+
 test("a missing argument is an error of the script, not a default", async () => {
   let r = await run(() => {}, { env: { AGENT_URLS: "http://127.0.0.1:9" } });
   assert.equal(r.code, 2);
