@@ -119,6 +119,14 @@ test("a tighter scripted rule and nothing spent is a tightening: no face scan", 
   assert.deepEqual(r.world.calls.map((c) => c.gated), [false]);
 });
 
+test("a tightening-only plan needs no CREDENTIAL_ID even with two credentials registered (demo beat 4, second half)", async () => {
+  // Found on a live deployment: the script demanded CREDENTIAL_ID before it had planned anything.
+  const r = await reset({ rec: rec({ period_limit: "9000000" }, "0"), ids: [F.REAL, F.SOFT] });
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.match(r.out, /0 of them need a face scan/);
+  assert.deepEqual(r.world.calls.map((c) => c.gated), [false]);
+});
+
 test("a paused node is unpaused by a gated step, because unpausing is a loosening", async () => {
   const r = await reset({ rec: rec({ paused: true }, "0"), onChallenge: sign });
   assert.equal(r.code, 0, r.out + r.err);

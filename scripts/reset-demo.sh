@@ -70,14 +70,6 @@ view() { # <method> <json-args>
 ids=$(view credential_ids '{}')
 count=$(jq 'length' <<<"$ids") || die "credential_ids returned something that is not a list: $ids"
 [[ $count -gt 0 ]] || die "no credential is registered on $WALLET; register one first"
-if [[ -n ${CREDENTIAL_ID:-} ]]; then
-  jq -e --arg c "$CREDENTIAL_ID" 'index($c) != null' <<<"$ids" >/dev/null || die "CREDENTIAL_ID $CREDENTIAL_ID is not registered; registered: $(jq -c . <<<"$ids")"
-  cred=$CREDENTIAL_ID
-elif [[ $count -eq 1 ]]; then
-  cred=$(jq -r '.[0]' <<<"$ids")
-else
-  die "$count credentials are registered and a gated step can only be signed by one of them: set CREDENTIAL_ID to the one whose device you will use. Registered: $(jq -c . <<<"$ids")"
-fi
 
 # ---- the plan -------------------------------------------------------------------------------
 
@@ -124,6 +116,20 @@ if [[ $steps -eq 0 ]]; then
 fi
 echo "plan: $steps set_rule call(s), $scans of them need a face scan"
 jq -r 'to_entries[] | "  step \(.key + 1): \(if .value.gated then "FACE SCAN" else "no prompt " end)  \(.value.why)"' <<<"$PLAN"
+
+# Which credential signs matters only if a step needs a face scan: a plan made of tightenings
+# (the second half of demo beat 4) must run with no CREDENTIAL_ID, whatever is registered.
+cred=
+if [[ $scans -gt 0 ]]; then
+  if [[ -n ${CREDENTIAL_ID:-} ]]; then
+    jq -e --arg c "$CREDENTIAL_ID" 'index($c) != null' <<<"$ids" >/dev/null || die "CREDENTIAL_ID $CREDENTIAL_ID is not registered; registered: $(jq -c . <<<"$ids")"
+    cred=$CREDENTIAL_ID
+  elif [[ $count -eq 1 ]]; then
+    cred=$(jq -r '.[0]' <<<"$ids")
+  else
+    die "$count credentials are registered and a gated step can only be signed by one of them: set CREDENTIAL_ID to the one whose device you will use. Registered: $(jq -c . <<<"$ids")"
+  fi
+fi
 echo
 
 # The challenge a saved assertion actually signed, as standard base64 without padding. It is
