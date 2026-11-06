@@ -79,9 +79,11 @@ export function matchTxs(sent, chain) {
     if (!a.tx) continue;
     const known = a.countBefore != null && a.strangersBefore != null;
     const newer = (list, count, before) => list.slice(0, Math.max(0, count - before));
-    const pool = known
-      ? [...newer(chain.decisions, chain.decision_count, a.countBefore), ...newer(chain.strangers, chain.stranger_count, a.strangersBefore)]
-      : [...chain.decisions, ...chain.strangers].filter((e) => e.timestamp_ms >= a.at - CLOCK_SKEW_MS);
+    // Unknown counts (the pre-send read failed) link nothing, the same rule settle() applies: a
+    // timestamp cannot tell this attempt from an identical earlier one, and a wrong link opens a
+    // transaction that did not make the decision. No link is the honest answer, and the page says so.
+    if (!known) continue;
+    const pool = [...newer(chain.decisions, chain.decision_count, a.countBefore), ...newer(chain.strangers, chain.stranger_count, a.strangersBefore)];
     // newest first, so the last match is the oldest unclaimed one
     const hit = [...pool].reverse().find((e) => sameAttempt(e, a) && !claimed.has(key(e)));
     if (hit) { claimed.add(key(hit)); out[key(hit)] = a.tx; }
@@ -122,8 +124,8 @@ export async function sendAndRecord(state, intent, { send, readLog }) {
     understood: intent.understood ?? null,
     text: intent.text ?? null,
     prediction: intent.prediction ?? null,
-    // null, with countKnown false, when the pre-send read failed: honest in JSON, and settle()
-    // switches to matching on the timestamp.
+    // null, with countKnown false, when the pre-send read failed: honest in JSON. settle() and
+    // matchTxs() then match nothing, because a timestamp cannot tell this attempt from an earlier one.
     countKnown: before != null,
     countBefore: before?.decision_count ?? null,
     strangersBefore: before?.stranger_count ?? null,
@@ -163,7 +165,6 @@ export async function sendAndRecord(state, intent, { send, readLog }) {
     else if (tx) remember(state, { ...attempt, tx, at: action.at, countBefore: action.countBefore, strangersBefore: action.strangersBefore });
     return failed;
   }
-  return state.lastAction;
 }
 
 // An unconfirmed send is resolved by asking the chain about its exact hash, never by guessing from

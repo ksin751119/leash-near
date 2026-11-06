@@ -32,6 +32,17 @@ test("a missing, corrupt or hostile file is an empty record, and bad rows are dr
   assert.deepEqual(loadSent(join(d, "mixed.json")), [e(1), e(2)]);
 });
 
+test("rows whose counts are malformed are dropped on load; null counts are kept", () => {
+  const d = dir();
+  const bad = [
+    { ...e(1), countBefore: "3" }, { ...e(2), countBefore: -1 }, { ...e(3), strangersBefore: 1.5 },
+    { ...e(4), countBefore: Number.MAX_VALUE }, { ...e(5), strangersBefore: undefined }, { ...e(6), countBefore: {} },
+  ];
+  const keep = { ...e(7), countBefore: null, strangersBefore: null };
+  writeFileSync(join(d, "c.json"), JSON.stringify({ sent: [...bad, keep, e(8)] }));
+  assert.deepEqual(loadSent(join(d, "c.json")), [keep, e(8)]);
+});
+
 test("the file is private to the owner", () => {
   const p = join(dir(), "s.json");
   saveSent(p, [e(1)]);

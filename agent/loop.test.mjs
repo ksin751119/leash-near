@@ -227,6 +227,37 @@ test("two identical payments each get their own transaction", () => {
   assert.deepEqual(matchTxs(sent, chain), { [`${ALPHA}|111`]: "TX1", [`${ALPHA}|222`]: "TX2" });
 });
 
+test("an attempt whose pre-send counts are unknown links nothing, and does not throw", () => {
+  const e = entry({ amount: "5000000", timestamp_ms: 111 });
+  const chain = log({ decisions: [e], decision_count: 4 });
+  const base = { agent: ALPHA, payee: PAY1, amount: "5000000", tx: "TXA", at: 100 };
+  assert.deepEqual(matchTxs([{ ...base, countBefore: null, strangersBefore: null }], chain), {});
+  // one count known and the other not is still unknown
+  assert.deepEqual(matchTxs([{ ...base, countBefore: 3, strangersBefore: null }], chain), {});
+  assert.deepEqual(matchTxs([{ ...base, countBefore: null, strangersBefore: 0 }], chain), {});
+});
+
+test("an unknown-count attempt does not hide or steal a link that is known", () => {
+  const first = entry({ amount: "5000000", timestamp_ms: 111 });
+  const second = entry({ amount: "5000000", timestamp_ms: 222 });
+  const chain = log({ decisions: [second, first], decision_count: 5 });
+  const base = { agent: ALPHA, payee: PAY1, amount: "5000000" };
+  const sent = [
+    { ...base, tx: "TXLOST", at: 100, countBefore: null, strangersBefore: null },
+    { ...base, tx: "TXKNOWN", at: 200, countBefore: 4, strangersBefore: 0 },
+  ];
+  assert.deepEqual(matchTxs(sent, chain), { [`${ALPHA}|222`]: "TXKNOWN" });
+});
+
+test("/state still answers when a sent entry has unknown counts and the log is not empty", () => {
+  const sent = [{ agent: ALPHA, payee: PAY1, amount: "5000000", tx: "TXA", at: 100, countBefore: null, strangersBefore: null }];
+  const state = { name: "payments", agentAddr: ALPHA, lastAction: null, sent };
+  const chain = log({ decisions: [entry({ amount: "5000000", timestamp_ms: 111 })], decision_count: 4 });
+  const s = publicState(state, chain, view());
+  assert.equal(s.name, "payments");
+  assert.equal(s.cohort.recent.length, 1);
+});
+
 test("an attempt with no transaction hash links nothing", () => {
   const chain = log({ decisions: [entry({ amount: "5000000" })], decision_count: 4 });
   assert.deepEqual(matchTxs([{ agent: ALPHA, payee: PAY1, amount: "5000000", tx: null, at: 1, countBefore: 3, strangersBefore: 0 }], chain), {});
