@@ -58,8 +58,9 @@ near account list-keys <wallet> network-config testnet now
 ```
 
 Expect an empty table (a header and no rows). Say: "The account that holds the money has no keys.
-Nobody can sign as it, including me. The only way money leaves is `spend`, and `spend` is called
-from the agents' own accounts and decided by the contract."
+Nobody can sign as it, including me. Money leaves by exactly two doors. One is `spend`, which the
+agents call from their own accounts and the contract decides. The other is `withdraw`, which needs
+a passkey — a human at a registered device. Neither door opens for the admin key alone."
 
 ```bash
 near account list-keys alpha.<budget-node> network-config testnet now
