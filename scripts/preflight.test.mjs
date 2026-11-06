@@ -154,6 +154,10 @@ test("the human gate: unnamed, unregistered, the software credential, never used
   r = await run(() => {}, { env: { REAL_DEVICE_CREDENTIAL_ID: "nope==" } });
   assert.match(failing(r), /HUMAN GATE: REAL_DEVICE_CREDENTIAL_ID is not registered/);
   r = await run(() => {}, { env: { REAL_DEVICE_CREDENTIAL_ID: F.SOFT } });
+  assert.match(failing(r), /the FIRST credential registered is not the real device/, "naming the software one while the device is first");
+  const softFirst = join(dir, "dep-soft-first.json");
+  writeFileSync(softFirst, JSON.stringify({ ...F.deployment, credentials: [F.deployment.credentials[1], F.deployment.credentials[0]] }));
+  r = await run(() => {}, { env: { LEASH_DEPLOYMENT: softFirst, REAL_DEVICE_CREDENTIAL_ID: F.SOFT } });
   assert.match(failing(r), /recorded in .* as 'SOFTWARE P-256, shakedown only', not as a device/);
   r = await run((w) => { w.views[`${F.WALLET}.credential_nonce`] = () => 0; });
   assert.match(failing(r), /never produced an assertion the chain accepted/);
@@ -214,6 +218,21 @@ test("whichever single read fails, preflight still finishes, says so, and is not
     const checks = Number(/(\d+) checks/.exec(r.out)[1]);
     assert.ok(checks >= baseChecks - 6, `${name}: only ${checks} of ${baseChecks} checks ran`);
   }
+});
+
+test("the real device must be the FIRST credential registered, and the output says why the order matters", async () => {
+  const file = join(dir, "dep-order.json");
+  writeFileSync(file, JSON.stringify({ ...F.deployment, credentials: [...F.deployment.credentials].reverse() }));
+  const r = await run(() => {}, { env: { LEASH_DEPLOYMENT: file } });
+  assert.equal(r.code, 1);
+  assert.match(failing(r), /the FIRST credential registered is not the real device/);
+  assert.match(failing(r), /only the first registration is admin-alone/);
+  assert.match(failing(r), /redeploy, and register the device first/);
+  assert.doesNotMatch(r.out, /READY to record/);
+  const ok = await run();
+  assert.match(ok.out, /READY to record/);
+  assert.match(ok.out, /only if the real device was registered FIRST/);
+  assert.match(ok.out, /is the first credential recorded/);
 });
 
 test("a missing argument is an error of the script, not a default", async () => {

@@ -119,6 +119,7 @@ rot silently. Run any one with `cargo test <test_name>` (Rust) or `node --test <
 | Preflight names the agent process that does not answer. | `scripts/preflight.test.mjs::"an agent process that does not answer is named, and the other is not"` |
 | Preflight requires two credentials, and a named real-device credential that has had an assertion verified. | `scripts/preflight.test.mjs::"two credentials are required"`, `scripts/preflight.test.mjs::"the human gate: unnamed, unregistered, the software credential, never used, and a real use"` |
 | Whichever single chain read fails or comes back incomplete, preflight still finishes, names the failure and is not ready; with no endpoint at all no chain check passes. | `scripts/preflight.test.mjs::"whichever single read fails, preflight still finishes, says so, and is not ready"`, `scripts/preflight.test.mjs::"when no endpoint answers every chain check fails, none passes"` |
+| Preflight requires the real device to be the FIRST credential registered (the only one the admin key can add alone), and says why the order matters. | `scripts/preflight.test.mjs::"the real device must be the FIRST credential registered, and the output says why the order matters"` |
 | The human gate cannot go quiet: a deployment file that does not describe the registered credentials fails it. | `scripts/preflight.test.mjs::"a credential the deployment file does not describe makes the gate fail, never go quiet"` |
 | Registering a credential from the script follows the contract's rule: bootstrap by the admin, later ones signed. | `scripts/register-credential.test.mjs::"a later credential needs a signature from a registered one, and waits for it saying so"` |
 | A demo reset costs one face scan per widening step, none for a tightening, and never reuses an assertion. | `scripts/reset-demo.test.mjs::"scripted rule but money spent: a widening to reopen the window, then a tightening with no prompt"`, `scripts/reset-demo.test.mjs::"a stale assertion left in the directory is moved aside, not reused"` |
@@ -223,7 +224,7 @@ Last run, on this branch:
 | Command | Result |
 | --- | --- |
 | `cargo test` | 215 passed, 0 failed: 119 contract unit tests, 96 sandbox tests (frozen account 3, concurrency 4, keys 8, rules 44, spend 22, token 1, passkey verification 2, withdraw 12) |
-| `node --test agent/*.test.mjs web/*.test.mjs scripts/*.test.mjs` | 302 passed, 0 failed, 0 skipped: 256 in `agent/` and `web/`, 46 in `scripts/` |
+| `node --test agent/*.test.mjs web/*.test.mjs scripts/*.test.mjs` | 303 passed, 0 failed, 0 skipped: 256 in `agent/` and `web/`, 47 in `scripts/` |
 
 To see a gas figure: `cargo test --test spend -- --nocapture` (also `rules`, `widen_requires_passkey`,
 `withdraw`). The fixtures under `tests-sandbox/tests/fixtures/` are generated, not browser-captured

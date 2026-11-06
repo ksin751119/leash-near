@@ -165,7 +165,7 @@ What the scripts cover and what they do not. Names below are the ones in `deploy
    secret goes in `~/.leash-testnet/akf-<name>.json`, mode 600.
 5. Freeze the wallet: `scripts/freeze.sh <wallet> testnet --yes-i-mean-it`. Irreversible.
 6. Record the accounts in `deployments/testnet.json` (including `funded_wallet_balance`, the base
-   units you funded the wallet with, and `credentials`: `[{"id": ..., "kind": "DEVICE ..." or "SOFTWARE ..."}]` for every registered credential, which preflight needs) and `agent/vendors.json`. The tests read both files, so nothing else needs editing.
+   units you funded the wallet with, and `credentials`: `[{"id": ..., "kind": "DEVICE ..." or "SOFTWARE ..."}]` for every registered credential **in the order they were registered, real device first**; preflight refuses anything else, because the first credential is the only one the admin key can add alone) and `agent/vendors.json`. The tests read both files, so nothing else needs editing.
 7. Run the test suites, then the steps under "Before you record".
 
 The first rule for the budget node is applied by `reset-demo.sh`, not by hand, so the rule

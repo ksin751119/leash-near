@@ -374,8 +374,9 @@ pub fn rule(
     .expect("the test wrote an invalid rule")
 }
 
-/// Register `pk` as a credential that may authorise loosenings. ADMIN only, so it goes
-/// through the fixture's admin account.
+/// Register `pk` as the FIRST credential, the bootstrap: the one registration the admin makes
+/// alone, through the fixture's admin account. Every later credential needs an assertion from
+/// an existing one, see `register_passkey_via`.
 pub async fn register_passkey(fx: &Fixture, pk: &Passkey) -> anyhow::Result<()> {
     fx.admin
         .call(fx.wallet.id(), "register_credential")
