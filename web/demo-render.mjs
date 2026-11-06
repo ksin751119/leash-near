@@ -90,11 +90,31 @@ export function renderAction(a, reasons) {
       return { ...base, tone: "failed", label: "FAILED", moved: false,
         note: "The policy allowed it, then the token transfer failed and the reservation was released. NEAR gives the callback no reason, so there is none to show." };
     case "unknown":
-    case "error":
+    case "error": {
+      // The agent names how a send ended (errorKind) when it knows. Four endings, four messages:
+      // what the screen says on camera must tell "the chain said no" from "we could not reach it".
+      const kind = a.errorKind;
+      if (a.status === "error" && kind === "not-sent") {
+        return { ...base, tone: "failed", label: "NOT SENT · chain unreachable", moved: false, reason: a.reason ?? null,
+          note: "Nothing was sent and no money moved. The agent could not get a working answer from the chain. This is not a refusal." };
+      }
+      if (a.status === "error" && kind === "rejected") {
+        return { ...base, tone: "failed", label: "REJECTED BEFORE IT RAN", moved: false, reason: a.reason ?? null,
+          note: "The network refused the transaction itself, before the contract saw it. No money moved. This is not the contract refusing a payment." };
+      }
+      if (a.status === "error" && kind === "chain-failed") {
+        return { ...base, tone: "failed", label: "FAILED ON CHAIN · rolled back", moved: false, reason: a.reason ?? null,
+          note: "The transaction ran and failed, so it was rolled back and the contract recorded no decision. No money moved. This is not a refusal." };
+      }
+      if (a.status === "unknown" && kind === "unconfirmed") {
+        return { ...base, unresolved: true, tone: "unresolved", label: "SENT · NOT CONFIRMED", reason: a.reason ?? null,
+          note: "It was sent but the agent could not confirm what became of it, and it may still land. Not in flight: the agent has stopped waiting. This card checks the chain's log again every poll." };
+      }
       return { ...base, unresolved: true, tone: "unresolved",
         label: a.status === "error" ? "UNRESOLVED · error" : "UNRESOLVED · outcome unknown",
         reason: a.reason ?? null,
         note: "This is not in flight: the agent has stopped waiting and does not know how it ended. It may still show up in the chain's log; this card checks again every poll." };
+    }
     default:
       return { ...base, unresolved: true, tone: "unresolved",
         label: "UNRESOLVED · unrecognised status",

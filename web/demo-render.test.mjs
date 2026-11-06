@@ -320,3 +320,36 @@ test("renderAge says how old a read is, and says nothing was read when it was no
   assert.equal(renderAge(1000, 125000), "2m ago");
   assert.equal(renderAge(null, 5000), "not read yet");
 });
+
+// --- how a send ended, by its own name --------------------------------------------------
+
+test("a send that never reached the chain says so, and that nothing moved", () => {
+  const a = renderAction({ status: "error", errorKind: "not-sent", reason: "could not reach the chain to prepare the payment, so nothing was sent", understood: "u" }, REASONS);
+  assert.equal(a.inFlight, false);
+  assert.equal(a.unresolved, false);
+  assert.equal(a.moved, false);
+  assert.match(a.label, /NOT SENT/);
+  assert.match(a.label, /chain/i);
+});
+
+test("a transaction the chain ran and failed is distinguished from a refusal", () => {
+  const a = renderAction({ status: "error", errorKind: "chain-failed", reason: "Exceeded the prepaid gas", understood: "u" }, REASONS);
+  assert.match(a.label, /FAILED ON CHAIN/);
+  assert.notEqual(a.tone, "refused");
+  assert.match(a.note, /rolled back|no record/i);
+});
+
+test("a transaction refused before it ran is rejected, not refused by the contract", () => {
+  const a = renderAction({ status: "error", errorKind: "rejected", reason: "InvalidNonce", understood: "u" }, REASONS);
+  assert.match(a.label, /REJECTED/);
+  assert.equal(a.moved, false);
+  assert.equal(a.reason, "InvalidNonce");
+});
+
+test("sent but not confirmed is unresolved and says it may still land", () => {
+  const a = renderAction({ status: "unknown", errorKind: "unconfirmed", reason: "sent, but the chain could not be reached to confirm", tx: "T", understood: "u" }, REASONS);
+  assert.equal(a.unresolved, true);
+  assert.equal(a.inFlight, false);
+  assert.match(a.label, /NOT CONFIRMED/);
+  assert.match(a.note, /may still land/i);
+});

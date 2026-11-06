@@ -50,10 +50,35 @@ export const TTL_MS = {
 };
 const RETRY_AFTER_MS = 5_000;
 
+// The one place this project talks to the network. The reader's views and the signed payment both
+// go through here, so one endpoint list and one failover rule cover every call. Returns the parsed
+// JSON-RPC body (which may carry a non-transient `error`, e.g. a contract panic or an invalid
+// transaction); throws only when every endpoint failed transiently.
+let current = 0; // index of the endpoint that last worked, shared by every caller in the process
+export class AllEndpointsFailed extends Error {
+  constructor(detail, { reached }) { super(`every endpoint failed: ${detail}`); this.reached = reached; }
+}
+export async function rpcPost(payload, { fetchFn = (...a) => globalThis.fetch(...a), onAttempt = () => {}, timeoutMs = 8_000 } = {}) {
+  const list = endpoints();
+  let lastErr = "no endpoint configured";
+  for (let i = 0; i < list.length; i++) {
+    const url = list[(current + i) % list.length];
+    let res = null, b = null, err = null;
+    onAttempt(url);
+    try {
+      res = await fetchFn(url, { method: "POST", headers: { "content-type": "application/json" }, body: typeof payload === "string" ? payload : JSON.stringify(payload), signal: AbortSignal.timeout(timeoutMs) });
+      b = await res.json();
+    } catch (e) { err = e; }
+    if (!isTransient(res?.status ?? 0, b, err)) { current = (current + i) % list.length; return b; }
+    lastErr = err ? String(err.message ?? err) : `${url}: ${JSON.stringify(b?.error ?? res?.status).slice(0, 120)}`;
+  }
+  // `reached`: at least one endpoint answered (with a rate limit), so the network is up.
+  throw new AllEndpointsFailed(lastErr, { reached: false });
+}
+
 export function makeReader({ ttl = TTL_MS, serveStale = true, swr = false, now = Date.now, fetchFn = (...a) => globalThis.fetch(...a) } = {}) {
   const cache = new Map(); // key -> { value, at, promise, failedAt, error }
   const stats = { calls: 0 };
-  let cur = 0; // index of the endpoint that last worked
 
   async function rpcCall(account, method, args) {
     const isKeys = method === "view_access_key_list";
@@ -66,20 +91,7 @@ export function makeReader({ ttl = TTL_MS, serveStale = true, swr = false, now =
           args_base64: Buffer.from(JSON.stringify(args)).toString("base64"),
         },
     });
-    const list = endpoints();
-    let body, lastErr;
-    for (let i = 0; i < list.length; i++) {
-      const url = list[(cur + i) % list.length];
-      let res = null, b = null, err = null;
-      stats.calls++;
-      try {
-        res = await fetchFn(url, { method: "POST", headers: { "content-type": "application/json" }, body: payload, signal: AbortSignal.timeout(8_000) });
-        b = await res.json();
-      } catch (e) { err = e; }
-      if (!isTransient(res?.status ?? 0, b, err)) { cur = (cur + i) % list.length; body = b; lastErr = null; break; }
-      lastErr = err ? String(err.message ?? err) : `${url}: ${JSON.stringify(b?.error ?? res?.status).slice(0, 120)}`;
-    }
-    if (lastErr) throw new Error(`view ${method} failed on every endpoint: ${lastErr}`);
+    const body = await rpcPost(payload, { fetchFn, onAttempt: () => stats.calls++ });
     if (body.error || body.result?.error) {
       throw new Error(`view ${method} failed: ${JSON.stringify(body.error ?? body.result.error).slice(0, 200)}`);
     }

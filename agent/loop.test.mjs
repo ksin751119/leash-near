@@ -218,3 +218,46 @@ test("sendAndRecord keeps the transaction hash of what it sent, with the counts 
   assert.equal(state.sent[0].tx, "TXSENT");
   assert.equal(state.sent[0].countBefore, 3);
 });
+
+// --- how a send ended, and surviving a restart ---------------------------------------------
+
+import { SendError } from "./send.mjs";
+import { loadSent, saveSent } from "./sentstore.mjs";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const pay = { agent: ALPHA, payee: PAY1, amount: 5_000_000n, token: TOKEN };
+
+test("a send that never reached the chain is an error named not-sent, with no transaction", async () => {
+  const state = { name: "p", agentAddr: ALPHA, lastAction: null };
+  await sendAndRecord(state, pay, { send: async () => { throw new SendError("not-sent", "could not reach the chain"); }, readLog: async () => log({ decision_count: 3 }) });
+  assert.equal(state.lastAction.status, "error");
+  assert.equal(state.lastAction.errorKind, "not-sent");
+  assert.equal(state.lastAction.tx, null);
+  assert.equal(state.sent, undefined);
+});
+
+test("a send we could not confirm stays provisional, keeps its hash, and is settled by the chain later", async () => {
+  const state = { name: "p", agentAddr: ALPHA, lastAction: null };
+  await sendAndRecord(state, pay, { send: async () => { throw new SendError("unconfirmed", "may still land", "TXU"); }, readLog: async () => log({ decision_count: 3 }) });
+  assert.equal(state.lastAction.status, "unknown");
+  assert.equal(state.lastAction.errorKind, "unconfirmed");
+  assert.equal(state.lastAction.tx, "TXU");
+  assert.equal(state.sent[0].tx, "TXU");
+  const landed = log({ decisions: [entry({ amount: "5000000", timestamp_ms: 9 })], decision_count: 4 });
+  assert.equal(settle(state.lastAction, landed).status, "refused"); // the fixture entry is a refusal
+});
+
+test("the transaction links are still there after a restart", async () => {
+  const file = join(mkdtempSync(join(tmpdir(), "restart-")), "s.json");
+  const state = { name: "p", agentAddr: ALPHA, lastAction: null, sent: [] };
+  state.save = () => saveSent(file, state.sent);
+  const before = log({ decision_count: 3 });
+  const after = log({ decisions: [entry({ amount: "5000000", timestamp_ms: 77 })], decision_count: 4 });
+  let n = 0;
+  await sendAndRecord(state, pay, { send: async () => ({ txHash: "TXKEEP", outcome: { status: "allowed" } }), readLog: async () => (n++ === 0 ? before : after) });
+  const restarted = { name: "p", agentAddr: ALPHA, lastAction: null, sent: loadSent(file) };
+  const s = publicState(restarted, after, view());
+  assert.equal(s.txs[`${ALPHA}|77`], "TXKEEP");
+});

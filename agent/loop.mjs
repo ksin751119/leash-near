@@ -17,6 +17,7 @@ import { homedir } from "node:os";
 import { decide, formatUnits, parseUnits } from "./decide.mjs";
 import { readLog as chainLog, readView as chainView, makeReader } from "./chain.mjs";
 import { sendSpend } from "./send.mjs";
+import { loadSent, saveSent } from "./sentstore.mjs";
 import { parseInstruction } from "./parse.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -87,6 +88,13 @@ export function matchTxs(sent, chain) {
   return out;
 }
 
+// Keeps the hash of a payment this process sent, and saves the record (state.save, set in start()).
+function remember(state, entry) {
+  (state.sent ??= []).push(entry);
+  if (state.sent.length > 40) state.sent.shift();
+  state.save?.();
+}
+
 // Sends one payment and leaves state.lastAction in a final state no matter how it ends.
 export async function sendAndRecord(state, intent, { send, readLog }) {
   const attempt = { agent: intent.agent, payee: intent.payee, amount: String(intent.amount) };
@@ -124,12 +132,15 @@ export async function sendAndRecord(state, intent, { send, readLog }) {
       next = { ...next, status: "unknown", reason: "sent, but the chain has not recorded it yet" };
     }
     state.lastAction = next;
-    if (action.tx) {
-      (state.sent ??= []).push({ ...attempt, tx: action.tx, at: action.at, countBefore: action.countBefore, strangersBefore: action.strangersBefore });
-      if (state.sent.length > 40) state.sent.shift();
-    }
+    if (action.tx) remember(state, { ...attempt, tx: action.tx, at: action.at, countBefore: action.countBefore, strangersBefore: action.strangersBefore });
   } catch (err) {
-    state.lastAction = { ...action, status: "error", reason: String(err.message ?? err).slice(0, 300) };
+    // SendError names how it ended (send.mjs); anything else is an unexpected failure of ours.
+    // "unconfirmed" is the one ending where the chain may still have the payment: it stays
+    // provisional ("unknown") so settle() keeps checking the log for it.
+    const kind = err?.kind ?? null;
+    const status = kind === "unconfirmed" ? "unknown" : "error";
+    state.lastAction = { ...action, status, errorKind: kind, tx: err?.txHash ?? action.tx, reason: String(err.message ?? err).slice(0, 300) };
+    if (err?.txHash) remember(state, { ...attempt, tx: err.txHash, at: action.at, countBefore: action.countBefore, strangersBefore: action.strangersBefore });
   }
   return state.lastAction;
 }
@@ -227,17 +238,20 @@ function config() {
     name,
     agentAddr,
     port: Number(process.env.PORT || 8788),
-    network: process.env.NEAR_NETWORK || dep.network,
     wallet: process.env.WALLET || dep.wallet,
     token: process.env.TOKEN || dep.token,
     units: { decimals: Number(process.env.TOKEN_DECIMALS || 6), symbol: process.env.TOKEN_SYMBOL || "USDC" },
     keyFile,
+    sentFile: process.env.AGENT_SENT_FILE || join(here, `.sent-${agentAddr}.json`),
     vendors: JSON.parse(readFileSync(join(here, "vendors.json"), "utf8")),
   };
 }
 
 export function start(cfg = config()) {
-  const state = { name: cfg.name, agentAddr: cfg.agentAddr, lastAction: null };
+  // Which transaction caused which decision survives a restart: a small file beside the agent.
+  const sentFile = cfg.sentFile;
+  const state = { name: cfg.name, agentAddr: cfg.agentAddr, lastAction: null, sent: loadSent(sentFile) };
+  state.save = () => { if (!saveSent(sentFile, state.sent)) console.error(`WARNING: could not write ${sentFile}; transaction links will not survive a restart`); };
   // One reader per process, with the call budget described in chain.mjs.
   const reader = makeReader({ swr: true });
   const readView = (opts = {}) => chainView({ wallet: cfg.wallet, agent: cfg.agentAddr, units: cfg.units, reader, ...opts });
@@ -245,7 +259,7 @@ export function start(cfg = config()) {
   // Around a send the log must be current, not up to 5 s old: the pre-send count decides which
   // entries are "mine".
   const readLogFresh = () => chainLog(cfg.wallet, reader, { fresh: true });
-  const send = (i) => sendSpend({ network: cfg.network, wallet: cfg.wallet, agent: cfg.agentAddr, keyFile: cfg.keyFile, token: i.token, payee: i.payee, amount: i.amount });
+  const send = (i) => sendSpend({ wallet: cfg.wallet, agent: cfg.agentAddr, keyFile: cfg.keyFile, token: i.token, payee: i.payee, amount: i.amount });
 
   const json = (res, code, body) => {
     res.writeHead(code, { "content-type": "application/json", "access-control-allow-origin": "*", "access-control-allow-headers": "content-type" });
