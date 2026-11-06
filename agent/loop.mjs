@@ -17,9 +17,9 @@ import { homedir } from "node:os";
 import { decide, formatUnits, parseUnits } from "./decide.mjs";
 import { readLog as chainLog, readView as chainView } from "./chain.mjs";
 import { sendSpend } from "./send.mjs";
+import { parseInstruction } from "./parse.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const ACCOUNT_RE = /\b[a-z0-9][a-z0-9_.-]*\.(?:testnet|near)\b/;
 
 // --- reconciling with the chain -------------------------------------------------------
 
@@ -72,6 +72,8 @@ export async function sendAndRecord(state, intent, { send, readLog }) {
     ...attempt,
     token: intent.token,
     vendor: intent.vendor ?? null,
+    // What the agent says it understood, set before anything is sent so a misparse is on screen.
+    understood: intent.understood ?? null,
     text: intent.text ?? null,
     prediction: intent.prediction ?? null,
     // null, with countKnown false, when the pre-send read failed: honest in JSON, and settle()
@@ -157,55 +159,7 @@ export function publicState(state, chain, view) {
 
 // --- instructions ------------------------------------------------------------------------
 
-// The rule for every part of this: when the instruction is ambiguous, ASK. A question on screen
-// is fine; a confidently wrong amount with a green tick is the worst thing this product can do.
-//
-// Account ids are cut out first ("leash-pay2-1106fcff.testnet" has a 2 and a 1106 in it). Then
-// an amount is only a number that SAYS it is one: it has a decimal point ("0.50"), or sits next
-// to a unit ("5 USDC", "$5"). A bare integer is never an amount, so "acme2", "tier1" and "2x"
-// cannot become one. Signed, percent and thousands-separated numbers are refused, not read as
-// something else. Two different amounts, two candidate payees, or a negation all get a question.
-const NUMBER_RE = /(?<![\w.])([-+\u2212]?)(\$?)(\d+(?:[.,]\d+)*)(\s*%)?(?:\s*(usdc|usd|dollars?)\b)?(?!\w)/gi;
-const NEGATION_RE = /\b(?:not|never|don'?t|do not|dont|cancel|stop|instead of)\b/i;
-
-export function parseInstruction(text, vendors, decimals) {
-  const lower = String(text ?? "").toLowerCase();
-  const accounts = [...new Set(lower.match(new RegExp(ACCOUNT_RE.source, "g")) ?? [])];
-  const prose = lower.replace(new RegExp(ACCOUNT_RE.source, "g"), " ");
-
-  if (NEGATION_RE.test(prose)) {
-    return { error: "That sounds like a \"don't\"; I won't guess. Say what you want paid, positively." };
-  }
-
-  const amounts = new Set();
-  let sawBareInteger = false;
-  for (const m of prose.matchAll(NUMBER_RE)) {
-    const [, sign, dollar, digits, percent, unit] = m;
-    if (sign || percent) return { error: `I won't read "${m[0].trim()}" as an amount; give a plain positive amount like 5.00 USDC.` };
-    if (digits.includes(",")) return { error: `I won't read "${digits}" as an amount; write it without commas, like 1000.00 USDC.` };
-    if (/^\d+\.\d+$/.test(digits) || unit || dollar) amounts.add(digits);
-    else sawBareInteger = true;
-  }
-  if (amounts.size === 0) {
-    return { error: sawBareInteger
-      ? "I need the unit or a decimal point on the amount, like 5 USDC or 5.00."
-      : "I could not find an amount in that." };
-  }
-  if (amounts.size > 1) return { error: `I found more than one amount (${[...amounts].join(", ")}); say it once.` };
-  let amount;
-  try { amount = parseUnits([...amounts][0], decimals); } catch (e) { return { error: e.message }; }
-
-  const word = (n) => new RegExp(`(?<![\\w-])${n.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`).test(prose);
-  const named = vendors.filter((v) => [v.name, ...(v.aliases ?? [])].some(word));
-  const payees = new Set([...accounts, ...named.map((v) => v.account)]);
-  if (payees.size > 1) {
-    return { error: `I found more than one payee (${[...payees].join(", ")}); name one.` };
-  }
-  if (payees.size === 0) return { error: "I do not know who to pay: name a vendor I know, or give an account id." };
-  const payee = [...payees][0];
-  const known = vendors.find((v) => v.account === payee);
-  return { payee, amount, vendor: known?.name ?? null };
-}
+export { parseInstruction };
 
 // The key file signs as the agent account. Anyone who can read it can spend its budget, so a
 // file readable by group or others is something to say out loud before the first send.
@@ -264,9 +218,9 @@ export function start(cfg = config()) {
       if (req.method === "POST" && req.url === "/instruct") {
         let text;
         try { text = JSON.parse(await readBody(req)).text; } catch { return json(res, 400, { error: "send JSON: {\"text\": \"...\"}" }); }
-        const parsed = parseInstruction(text, cfg.vendors, cfg.units.decimals);
+        const parsed = parseInstruction(text, cfg.vendors, cfg.units.decimals, { symbol: cfg.units.symbol });
         if (parsed.error) return json(res, 422, { error: parsed.error });
-        const intent = { agent: cfg.agentAddr, token: cfg.token, payee: parsed.payee, amount: parsed.amount, vendor: parsed.vendor, text };
+        const intent = { agent: cfg.agentAddr, token: cfg.token, payee: parsed.payee, amount: parsed.amount, vendor: parsed.vendor, understood: parsed.understood, text };
         intent.prediction = decide(await readView(), intent);
         // Sends whatever the prediction says: the chain is what refuses, and the refusal is
         // the thing worth recording.

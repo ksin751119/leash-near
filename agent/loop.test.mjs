@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { settle, sendAndRecord, parseInstruction, publicState, keyFileWarning } from "./loop.mjs";
+import { settle, sendAndRecord, publicState, keyFileWarning } from "./loop.mjs";
 import { entry, log, view, ALPHA, BETA, PAY1, TOKEN, NODE, UNITS } from "./fixtures.mjs";
 
 const inFlight = (over = {}) => ({
@@ -86,15 +86,6 @@ test("/state keeps strangers apart from agents and renders a null node as null",
   assert.equal(s.cohort.left, "3.00");
 });
 
-test("parseInstruction finds an amount and a payee by vendor name or account id", () => {
-  const vendors = [{ id: "pay1", name: "Acme Studio", aliases: ["acme"], account: PAY1 }];
-  const a = parseInstruction("pay Acme 2.50 USDC", vendors, UNITS.decimals);
-  assert.deepEqual([a.payee, a.amount, a.vendor], [PAY1, 2_500_000n, "Acme Studio"]);
-  const b = parseInstruction("send 1 USDC to someone-else.testnet", vendors, UNITS.decimals);
-  assert.deepEqual([b.payee, b.amount, b.vendor], ["someone-else.testnet", 1_000_000n, null]);
-  assert.equal(parseInstruction("pay a stranger", vendors, 6).error.length > 0, true);
-});
-
 // --- the send finished but the chain cannot be read (a slow network, which is when we record) ---
 
 const attempt = { agent: ALPHA, payee: PAY1, amount: 5_000_000n, token: TOKEN };
@@ -154,42 +145,6 @@ test("when the pre-send read failed, countBefore is null (not Infinity) and the 
   assert.equal(old.status, "in-flight");
 });
 
-// --- the instruction parser ---
-
-const vendors = [
-  { id: "pay1", name: "Acme Studio", aliases: ["acme", "pay1"], account: PAY1 },
-  { id: "pay2", name: "Inference API", aliases: ["inference", "api", "pay2"], account: "leash-pay2-1106fcff.testnet" },
-];
-const P2 = "leash-pay2-1106fcff.testnet";
-
-test("digits in the payee's account id are not the amount, amount after the payee", () => {
-  const r = parseInstruction(`send to ${P2} 0.10 USDC`, vendors, 6);
-  assert.equal(r.amount, 100_000n);
-  assert.equal(r.payee, P2);
-});
-
-test("digits in the payee's account id are not the amount, amount before the payee", () => {
-  const r = parseInstruction(`send 0.10 USDC to ${P2}`, vendors, 6);
-  assert.equal(r.amount, 100_000n);
-  assert.equal(r.payee, P2);
-});
-
-test("an account id and no amount is an error, not 2.00 or 1106", () => {
-  for (const t of [`send to ${P2}`, `pay ${P2} now`, "pay pay2"]) {
-    assert.ok(parseInstruction(t, vendors, 6).error, t);
-  }
-});
-
-test("a number inside a word is not an amount, and two different numbers are refused", () => {
-  assert.equal(parseInstruction("pay1 3 USDC", vendors, 6).amount, 3_000_000n);
-  assert.match(parseInstruction("pay Acme 3 USDC or 4 USDC", vendors, 6).error, /more than one/);
-  assert.equal(parseInstruction("pay Acme 5.00 USDC.", vendors, 6).amount, 5_000_000n);
-});
-
-test("a vendor alias inside a longer word does not match", () => {
-  assert.ok(parseInstruction("pay capital 1 USDC", vendors, 6).error);
-});
-
 // --- key file ---
 
 test("a key file readable by others produces a loud warning, a private one does not", () => {
@@ -198,41 +153,12 @@ test("a key file readable by others produces a loud warning, a private one does 
   assert.match(keyFileWarning("/k.json", 0o100660), /WARNING/);
 });
 
-// --- ambiguity is a question, never a guess ---
-
-test("a bare integer is never the amount: vendor shorthands with digits, 2x, no unit", () => {
-  for (const t of ["pay acme2 0.50 USDC", "pay vendor3 5", "pay tier1 5", "send 2x 0.50", "pay Acme 5"]) {
-    const r = parseInstruction(t, vendors, 6);
-    // Either it asks, or (when a real amount and payee are both present) it never used the digit.
-    if (r.amount !== undefined) assert.notEqual(r.amount, 2_000_000n, t);
-    if (t === "pay acme2 0.50 USDC") assert.ok(r.error, "acme2 is not a vendor I know");
-    if (t === "pay Acme 5") assert.match(r.error, /unit or a decimal/);
-  }
-  assert.equal(parseInstruction("pay Acme 0.50 USDC", vendors, 6).amount, 500_000n);
-  assert.equal(parseInstruction("pay Acme $5", vendors, 6).amount, 5_000_000n);
-  assert.equal(parseInstruction("pay Acme 5 usdc", vendors, 6).amount, 5_000_000n);
-});
-
-test("thousands separators, signs and percents are refused, not read as something else", () => {
-  for (const t of ["pay acme 1,000 USDC", "pay acme 1,000.50 USDC", "pay acme -5 USDC", "pay acme +5.00", "pay acme 5%", "pay acme 5.00%"]) {
-    assert.ok(parseInstruction(t, vendors, 6).error, t);
-    assert.equal(parseInstruction(t, vendors, 6).amount, undefined, t);
-  }
-});
-
-test("two candidate payees, or a negation, get a question", () => {
-  for (const t of [
-    "pay acme 5.00 USDC to bob.testnet",
-    "pay 5.00 USDC to alice.testnet not bob.testnet",
-    "pay 5.00 USDC to alice.testnet and bob.testnet",
-    "pay acme 1.00 USDC and inference",
-    "don't pay acme 5.00 USDC",
-    "do not pay acme 5.00 USDC",
-  ]) {
-    const r = parseInstruction(t, vendors, 6);
-    assert.ok(r.error, t);
-    assert.equal(r.payee, undefined, t);
-  }
-  // The same payee named twice (by name and by account) is not a conflict.
-  assert.equal(parseInstruction(`pay acme 5.00 USDC at ${PAY1}`, vendors, 6).payee, PAY1);
+test("what the agent understood is on lastAction from the moment it is in flight, and stays after", async () => {
+  const state = { lastAction: null };
+  let during;
+  const send = async () => { during = state.lastAction; return { txHash: "TX", outcome: { status: "refused", code: 5, reason: "x" } }; };
+  await sendAndRecord(state, { ...attempt, understood: "paying 5.00 USDC to Acme Studio (a.testnet)" }, { send, readLog: unreadable });
+  assert.equal(during.status, "in-flight");
+  assert.equal(during.understood, "paying 5.00 USDC to Acme Studio (a.testnet)");
+  assert.equal(state.lastAction.understood, during.understood);
 });
