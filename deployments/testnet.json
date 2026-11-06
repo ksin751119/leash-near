@@ -23,6 +23,6 @@
     }
   ],
   "wallet_frozen": true,
-  "notes": "public data only; private keys are in ~/.leash-testnet and ~/.near-credentials",
+  "notes": "REHEARSAL ARTIFACT, frozen, older contract code, software credentials; cannot be reset or driven. public data only; private keys are in ~/.leash-testnet and ~/.near-credentials",
   "funded_wallet_balance": "500000000"
 }

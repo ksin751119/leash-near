@@ -96,8 +96,13 @@ test("idle budget: one minute of /state polling every 2 s makes the calls the bu
     ]);
     advance(2_000);
   }
-  // 60 s: log 12 (5 s, polled every 2 s so it lands every 6 s = 10) + record ~6 + paused ~4 + 2 once
-  assert.ok(calls.length <= 30, `${calls.length} calls in a minute for one agent`);
+  // 60 s on a fake clock, so the counts are exact: the log every third poll (5 s TTL, polled every
+  // 2 s) = 10, node_record every fifth (10 s) = 6, is_paused every eighth (15 s) = 4, and
+  // node_for / refusal_codes once, since they never expire. 22 in all. Halving a TTL changes a
+  // number here, which is the point.
+  const per = calls.reduce((m, c) => ((m[c] = (m[c] ?? 0) + 1), m), {});
+  assert.deepEqual(per, { decision_log: 10, node_for: 1, is_paused: 4, node_record: 6, refusal_codes: 1 });
+  assert.equal(calls.length, 22);
 });
 
 test("stale-while-revalidate: an expired value is answered at once and refreshed behind it", async () => {

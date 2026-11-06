@@ -242,7 +242,7 @@ body { margin:0; background:var(--ground); color:var(--ink); font-family:var(--s
           <div id="strangers"><div class="empty">no stranger has called spend</div></div>
         </div>
         <div class="foot">
-          <b>Every refusal is a successful transaction.</b> The contract returns the refusal instead of reverting, so the explorer shows a green tick beside a payment that did not happen. A revert would roll the record back and leave no reason on-chain. Reasons are the contract's own words. Anyone can call <code>spend</code>; strangers get their own small ring so they cannot push out the agents' evidence.
+          <b>Every refusal is a successful transaction.</b> The contract returns the refusal instead of reverting, so the explorer shows a transaction with no failed receipt, and a <code>leash: refused</code> log, beside a payment that did not happen. A revert would roll the record back and leave no reason on-chain. Reasons are the contract's own words. Anyone can call <code>spend</code>; strangers get their own small ring so they cannot push out the agents' evidence.
         </div>
       </section>
     </div>
@@ -404,7 +404,7 @@ body { margin:0; background:var(--ground); color:var(--ink); font-family:var(--s
       const u = h("div", "understood", null, h("small", null, "what the agent understood"), document.createTextNode(a.understood));
       card.append(u);
       if (a.reason) card.append(h("div", "reason", a.reason, a.code != null ? h("small", null, `code ${a.code}`) : null));
-      card.append(h("div", "why", a.note + (a.settledBy === "return-value" ? " (from spend's return value; the log had not caught up)" : "")));
+      card.append(h("div", "why", a.note));
       if (a.txUrl) card.append(h("div", "tx", "tx ", link(a.txUrl, a.txShort)));
       if (a.txNote) {
         // The hinge of the demo: a refusal is a SUCCESSFUL transaction. Said with weight, and the

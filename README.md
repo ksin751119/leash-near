@@ -20,6 +20,22 @@ transaction's logs. Each refusal code has a test that asserts all three things a
 transaction succeeded, no balance moved, the recorded decision names the code); they are in the
 table below, under "Payments".
 
+Live examples, from the rehearsal deployment (account ids end in `1106fcff`), on testnet:
+
+- the wallet: [leash-wal-1106fcff.testnet](https://testnet.near.rocks/account/leash-wal-1106fcff.testnet) (0 access keys, contract deployed)
+- an allowed payment: [8USjMTU…9Whz](https://testnet.near.rocks/tx/8USjMTUSFsLvuCfrVVqcWQE2pyfp2QnusZxN92YE9Whz), log `leash: allowed`, then `ft_transfer` runs on the token
+- a refused payment: [4o9CKTQ…7qEp](https://testnet.near.rocks/tx/4o9CKTQcvQmxfFtCAjoQAseDkb4HV65fom6NH2ZH7qEp), log `leash: refused`, return value `{"status":"refused","code":4,"reason":"payee is not on the allow-list"}`, and no `ft_transfer` receipt
+
+<!-- NOTE FOR THE AUTHOR: these three links point at the REHEARSAL deployment (1106fcff). Re-point them at the fresh deployment's wallet, one allowed and one refused transaction before submitting, and drop the "rehearsal" sentence above. -->
+
+What the dashboard looks like, captured on the same rehearsal deployment (a refusal beside the shared
+budget bar, then a refusal and an allowed payment from the two agents). These were taken before two
+wording fixes: the wallet-keys sentence now says money leaves by two doors, `spend` and `withdraw`,
+and the footnote now says the explorer shows a transaction with no failed receipt rather than a green tick.
+
+![A refused payment and the budget bar](docs/screenshot-refusal-and-budget.png)
+![A refusal and an allowed payment from the two agents](docs/screenshot-refused-and-allowed.png)
+
 ## What is claimed, and the test that proves it
 
 A claim with no test is not in this list. Each reference is `file::test_name`;
@@ -228,6 +244,9 @@ node --test agent/*.test.mjs web/*.test.mjs scripts/*.test.mjs
 ```
 
 Sandbox tests build the contracts from source and download the NEAR sandbox binary on first run.
+A first `cargo test` needs several GB of free disk and takes 5 minutes or more before the first test
+runs (it compiles the contracts and the sandbox's dependencies). If the disk fills up, the failure
+shows up as a linker "Bus error", not as a message about space: check `df -h` first.
 Last run, on this branch:
 
 | Command | Result |
@@ -249,8 +268,13 @@ scripts/preflight.sh                   # READY to record, or a list of what is w
 
 `docs/demo-script.md` has the beats, the exact words to type, and what each should show. The
 sentences the agents accept are a closed grammar; the verified ones are in `docs/safe-phrasings.md`.
-The first testnet deployment is frozen with older code and a software credential, so the recording
-needs a fresh one ("Setting up a deployment" in the demo script).
+`deployments/testnet.json` is not a deployment you can run this against. It is the frozen record of
+the dress-rehearsal deployment (ids ending `044127`): the wallet has no keys, it runs older contract
+code, and both registered credentials are software P-256 keys made for the rehearsal, not a phone's
+passkey. `reset-demo.sh` and `preflight.sh` will fail against it, by design. You can read it, and look
+up its public accounts on near.rocks; you cannot reset, widen or drive it. The recording needs a fresh
+deployment ("Setting up a deployment" in the demo script). The links above point at an earlier
+rehearsal (`1106fcff`), not at this one.
 
 ## Deliberately not built
 

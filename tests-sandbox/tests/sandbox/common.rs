@@ -38,7 +38,13 @@ pub fn build_wasm(package: &str) -> anyhow::Result<Vec<u8>> {
         .status()?;
     anyhow::ensure!(status.success(), "building {package} to wasm failed");
     let file = package.replace('-', "_");
-    let path = root.join(format!("target/wasm32-unknown-unknown/release/{file}.wasm"));
+    // cargo puts its output under CARGO_TARGET_DIR when that is set (common in CI and containers),
+    // relative to the directory cargo ran in.
+    let target = match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(dir) => root.join(dir),
+        None => root.join("target"),
+    };
+    let path = target.join(format!("wasm32-unknown-unknown/release/{file}.wasm"));
     Ok(std::fs::read(path)?)
 }
 
