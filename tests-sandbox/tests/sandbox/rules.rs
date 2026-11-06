@@ -7,13 +7,16 @@
 //!
 //! The passkey is a software P-256 key minted by the test (see `common::Passkey`). The
 //! contract cannot tell that from a secure enclave and never claims to; that is precisely
-//! why `register_credential` is admin-only, and two tests here pin it.
+//! why registering a credential is guarded: the first one by the admin alone (the bootstrap), every
+//! later one by an assertion from a credential that already exists. Tests below pin both halves.
 
 mod common;
 
 use common::{
-    build_wasm, deploy_with_token, gate_challenge, set_rule_payload, why, AssertionJson, Fixture,
-    Passkey, ACTION_ADD_PAYEE, ACTION_SET_RULE, ACTION_UNPAUSE, FLAG_UP, HOST_PANIC_IMPORT,
+    build_wasm, deploy_with_token, gate_challenge, register_attempt, register_passkey_via,
+    register_payload, set_rule_payload, sign_registration, why, AssertionJson, Fixture, Passkey,
+    ACTION_ADD_PAYEE, ACTION_REGISTER, ACTION_SET_RULE, ACTION_UNPAUSE, ACTION_WITHDRAW, FLAG_UP,
+    HOST_PANIC_IMPORT,
 };
 use leash_contract::rule::Rule;
 use near_sdk::base64::{engine::general_purpose::STANDARD, Engine};
@@ -256,21 +259,38 @@ async fn tightening_needs_no_assertion() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Every field of a rule, loosened on its own, is refused without an assertion, even from the
+/// admin. The base is first tightened to a rule with room to loosen in every direction (a window
+/// that is not already open-ended), so no variant is accidentally a no-op or a tightening.
 #[tokio::test]
 async fn widening_without_assertion_is_rejected() -> anyhow::Result<()> {
     let (fx, _pk) = ready().await?;
     let token = fx.token.id().to_string();
 
-    // per_tx_limit up from 1_000: one field, unambiguously looser.
-    let wider = rule(&token, 2_000, 10_000, 86_400_000, 0, u64::MAX, &["alice.testnet"], false);
-    let res = set_rule(&fx, &fx.admin, NODE, &wider, None).await?;
-    assert!(res.is_failure(), "widening went through with no assertion: {res:#?}");
-    let msg = why(res);
-    assert!(msg.contains("needs a passkey assertion"), "refused, but not by the gate: {msg}");
+    let current = rule(&token, 1_000, 10_000, 86_400_000, 1_000, 9_000_000, &["alice.testnet"], false);
+    let res = set_rule(&fx, &fx.admin, NODE, &current, None).await?;
+    assert!(res.is_success(), "tightening to the test's starting rule was refused: {res:#?}");
+    let before = rule_of(&fx, NODE).await?.expect("rule");
+
+    let variants = [
+        ("per_tx_limit up", rule(&token, 2_000, 10_000, 86_400_000, 1_000, 9_000_000, &["alice.testnet"], false)),
+        ("period_limit up", rule(&token, 1_000, 20_000, 86_400_000, 1_000, 9_000_000, &["alice.testnet"], false)),
+        ("period_ms shorter", rule(&token, 1_000, 10_000, 43_200_000, 1_000, 9_000_000, &["alice.testnet"], false)),
+        ("window starts earlier", rule(&token, 1_000, 10_000, 86_400_000, 0, 9_000_000, &["alice.testnet"], false)),
+        ("window ends later", rule(&token, 1_000, 10_000, 86_400_000, 1_000, 10_000_000, &["alice.testnet"], false)),
+        ("a payee added", rule(&token, 1_000, 10_000, 86_400_000, 1_000, 9_000_000, &["alice.testnet", "bob.testnet"], false)),
+        ("a payee swapped", rule(&token, 1_000, 10_000, 86_400_000, 1_000, 9_000_000, &["bob.testnet"], false)),
+        ("another token", rule("other.testnet", 1_000, 10_000, 86_400_000, 1_000, 9_000_000, &["alice.testnet"], false)),
+    ];
+    for (what, wider) in variants {
+        let res = set_rule(&fx, &fx.admin, NODE, &wider, None).await?;
+        assert!(res.is_failure(), "{what}: loosening went through with no assertion: {res:#?}");
+        let msg = why(res);
+        assert!(msg.contains("needs a passkey assertion"), "{what}: refused, but not by the gate: {msg}");
+    }
 
     // And nothing moved.
-    let stored = rule_of(&fx, NODE).await?.expect("rule is still there");
-    assert_eq!(stored["per_tx_limit"], json!("1000"));
+    assert_eq!(rule_of(&fx, NODE).await?.expect("rule is still there"), before);
     Ok(())
 }
 
@@ -557,6 +577,179 @@ async fn a_credential_cannot_be_re_registered() -> anyhow::Result<()> {
     assert!(res.is_failure(), "a credential id was re-registered: {res:#?}");
     let msg = why(res);
     assert!(msg.contains("already known"), "refused, but not for being a duplicate id: {msg}");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------
+// Who may add a credential: the trust boundary of the passkey gate
+// ---------------------------------------------------------------------------------------
+//
+// The contract cannot tell a software key from a hardware passkey, so if the admin key alone
+// could register a credential, a stolen admin key could mint its own and sign a widening or a
+// withdrawal with it, and "widening needs a passkey" would constrain nobody. So only the FIRST
+// credential is admin-only; every later one needs an assertion from one that already exists.
+
+/// The centre of the project. A stolen admin key, with everything it can do, still cannot add a
+/// credential, and so cannot widen a rule with one.
+#[tokio::test]
+async fn the_admin_key_alone_cannot_register_a_second_credential() -> anyhow::Result<()> {
+    let (fx, _pk) = ready().await?;
+    let token = fx.token.id().to_string();
+    let attacker = Passkey::new("an attacker's own key");
+
+    // Admin alone, no assertion.
+    let res = register_attempt(&fx, &fx.admin, &attacker, None).await?;
+    assert!(res.is_failure(), "the admin key alone registered a second credential: {res:#?}");
+    let msg = why(res);
+    println!("admin alone, no assertion: refused: {msg}");
+    assert!(msg.contains("the admin key alone cannot add one"), "refused, but not for the missing assertion: {msg}");
+
+    // Admin plus an assertion signed by the attacker's OWN, unregistered, key over its own
+    // registration: a perfectly valid signature from a key the contract has never heard of.
+    let forged = attacker.assert_over(&gate_challenge(
+        ACTION_REGISTER,
+        &register_payload(&attacker.credential_id, &attacker.pubkey_sec1(), 0),
+        0,
+        fx.wallet.id().as_str(),
+    ));
+    let res = register_attempt(&fx, &fx.admin, &attacker, Some(forged)).await?;
+    assert!(res.is_failure(), "a self-signed registration was accepted: {res:#?}");
+    let msg = why(res);
+    println!("admin + the attacker's self-signed assertion: refused: {msg}");
+    assert!(msg.contains("no such active credential"), "refused, but not because the signer is unknown: {msg}");
+
+    // And the attacker's key is therefore useless for a widening.
+    let wider = rule(&token, 9_000, 10_000, 86_400_000, 0, u64::MAX, &["alice.testnet"], false);
+    let a = attacker.assert_over(&gate_challenge(
+        ACTION_SET_RULE,
+        &set_rule_payload(NODE, &wider),
+        0,
+        fx.wallet.id().as_str(),
+    ));
+    let res = set_rule(&fx, &fx.admin, NODE, &wider, Some(a)).await?;
+    assert!(res.is_failure(), "a never-registered key widened a rule: {res:#?}");
+    assert!(why(res).contains("no such active credential"));
+
+    let ids: Vec<String> = fx.wallet.view("credential_ids").await?.json()?;
+    assert_eq!(ids.len(), 1, "no second credential may have reached state");
+    Ok(())
+}
+
+/// The positive half, so the test above cannot pass by registration simply being broken.
+#[tokio::test]
+async fn a_registered_credential_can_authorise_a_second_one() -> anyhow::Result<()> {
+    let (fx, pk) = ready().await?;
+    let token = fx.token.id().to_string();
+    let spare = Passkey::new("spare phone");
+    let before = nonce_of(&fx, &pk).await?;
+
+    register_passkey_via(&fx, &pk, &spare).await?;
+    let ids: Vec<String> = fx.wallet.view("credential_ids").await?.json()?;
+    println!("registered with an assertion from the first credential: {ids:?}");
+    assert_eq!(ids.len(), 2);
+    assert_eq!(nonce_of(&fx, &pk).await?, before + 1, "the signing credential's nonce is spent");
+
+    // And the new credential really can authorise something.
+    let wider = rule(&token, 9_000, 10_000, 86_400_000, 0, u64::MAX, &["alice.testnet"], false);
+    set_rule_signed(&fx, &spare, NODE, &wider).await?;
+    Ok(())
+}
+
+/// The signature authorises exactly this key: not another id, not another public key, and not a
+/// second use.
+#[tokio::test]
+async fn a_registration_assertion_binds_the_new_key_and_is_single_use() -> anyhow::Result<()> {
+    let (fx, pk) = ready().await?;
+    let (b, c) = (Passkey::new("phone b"), Passkey::new("phone c"));
+    let for_b = sign_registration(&fx, &pk, &b).await?;
+
+    let res = register_attempt(&fx, &fx.admin, &c, Some(for_b.clone())).await?;
+    assert!(res.is_failure(), "an assertion for one key registered another: {res:#?}");
+    assert!(why(res).contains("ChallengeMismatch"));
+    assert_eq!(fx.wallet.view("credential_ids").await?.json::<Vec<String>>()?.len(), 1);
+
+    // The same id with a different public key is a different registration too.
+    let mut swapped = b.registration();
+    swapped["cred"]["pubkey_sec1"] = c.registration()["cred"]["pubkey_sec1"].clone();
+    swapped["assertion"] = json!(for_b.clone());
+    let res = fx.admin.call(fx.wallet.id(), "register_credential").args_json(swapped).max_gas().transact().await?;
+    assert!(res.is_failure(), "the id was registered with someone else's public key: {res:#?}");
+    assert!(why(res).contains("ChallengeMismatch"));
+
+    // Control: it does register b, once.
+    register_attempt(&fx, &fx.admin, &b, Some(for_b.clone())).await?.into_result()?;
+    let res = register_attempt(&fx, &fx.admin, &c, Some(for_b)).await?;
+    assert!(res.is_failure(), "a spent registration assertion was accepted again: {res:#?}");
+    Ok(())
+}
+
+/// Registration has its own action tag, in both directions, tried against every other tag with
+/// the registration's own payload (the most adversarial case: only the tag differs).
+#[tokio::test]
+async fn a_registration_assertion_cannot_do_anything_else_and_nothing_else_registers() -> anyhow::Result<()> {
+    let (fx, pk) = ready().await?;
+    let token = fx.token.id().to_string();
+    let spare = Passkey::new("spare phone");
+    let reg_payload = register_payload(&spare.credential_id, &spare.pubkey_sec1(), 0);
+
+    // Other tags cannot register.
+    for (name, tag) in [
+        ("set_rule", ACTION_SET_RULE),
+        ("add_payee", ACTION_ADD_PAYEE),
+        ("unpause", ACTION_UNPAUSE),
+        ("withdraw", ACTION_WITHDRAW),
+    ] {
+        let a = sign(&fx, &pk, tag, &reg_payload).await?;
+        let res = register_attempt(&fx, &fx.admin, &spare, Some(a)).await?;
+        assert!(res.is_failure(), "a {name} assertion registered a credential: {res:#?}");
+        let msg = why(res);
+        assert!(msg.contains("ChallengeMismatch"), "{name}: refused, but not by the tag: {msg}");
+    }
+    assert_eq!(fx.wallet.view("credential_ids").await?.json::<Vec<String>>()?.len(), 1);
+
+    // A registration assertion cannot do any of the four other things.
+    let reg = sign_registration(&fx, &pk, &spare).await?;
+    let wider = rule(&token, 9_000, 10_000, 86_400_000, 0, u64::MAX, &["alice.testnet"], false);
+    let res = set_rule(&fx, &fx.admin, NODE, &wider, Some(reg.clone())).await?;
+    assert!(res.is_failure() && why(res).contains("ChallengeMismatch"), "set_rule accepted a registration assertion");
+    let res = add_payee(&fx, &fx.admin, NODE, "bob.testnet", reg.clone()).await?;
+    assert!(res.is_failure() && why(res).contains("ChallengeMismatch"), "add_payee accepted a registration assertion");
+    set_paused(&fx, &fx.admin, true, None).await?.into_result()?;
+    let res = set_paused(&fx, &fx.admin, false, Some(reg.clone())).await?;
+    assert!(res.is_failure() && why(res).contains("ChallengeMismatch"), "unpause accepted a registration assertion");
+    let res = fx
+        .admin
+        .call(fx.wallet.id(), "withdraw")
+        .args_json(json!({ "to": "alice.testnet", "amount": "1", "assertion": reg.clone() }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(res.is_failure() && why(res).contains("ChallengeMismatch"), "withdraw accepted a registration assertion");
+
+    // Control: it still registers.
+    register_attempt(&fx, &fx.admin, &spare, Some(reg)).await?.into_result()?;
+    Ok(())
+}
+
+/// Revoking is ungated, so a stolen admin key CAN strand the funds by revoking every credential
+/// (it cannot steal them). What it must not be able to do is then re-open the bootstrap and put
+/// its own key in: "first registration" means first ever, revoked credentials included.
+#[tokio::test]
+async fn removing_every_credential_does_not_reopen_the_bootstrap() -> anyhow::Result<()> {
+    let (fx, pk) = ready().await?;
+    let attacker = Passkey::new("an attacker's own key");
+    let a = sign_registration(&fx, &pk, &attacker).await?;
+    remove_credential(&fx, &fx.admin, &pk).await?.into_result()?;
+    assert!(fx.wallet.view("credential_ids").await?.json::<Vec<String>>()?.is_empty());
+
+    let res = register_attempt(&fx, &fx.admin, &attacker, None).await?;
+    assert!(res.is_failure(), "the bootstrap reopened after every credential was removed: {res:#?}");
+    assert!(why(res).contains("the admin key alone cannot add one"));
+    // Even an assertion signed while the credential was still valid is dead once it is removed.
+    let res = register_attempt(&fx, &fx.admin, &attacker, Some(a)).await?;
+    assert!(res.is_failure(), "a removed credential authorised a registration: {res:#?}");
+    assert!(why(res).contains("no such active credential"));
+    assert!(fx.wallet.view("credential_ids").await?.json::<Vec<String>>()?.is_empty());
     Ok(())
 }
 
@@ -1163,24 +1356,19 @@ async fn removing_a_credential_frees_a_slot_for_a_new_one() -> anyhow::Result<()
 
     // Fill every slot.
     let keys: Vec<Passkey> = (0..8).map(|i| Passkey::new(&format!("phone {i}"))).collect();
-    for pk in &keys {
-        register(&fx, pk).await?;
+    register(&fx, &keys[0]).await?; // the bootstrap: admin alone
+    for pk in &keys[1..] {
+        register_passkey_via(&fx, &keys[0], pk).await?; // every later one needs a signature
     }
     let ninth = Passkey::new("phone 8");
-    let res = fx
-        .admin
-        .call(fx.wallet.id(), "register_credential")
-        .args_json(ninth.registration())
-        .max_gas()
-        .transact()
-        .await?;
+    let res = register_attempt(&fx, &fx.admin, &ninth, Some(sign_registration(&fx, &keys[0], &ninth).await?)).await?;
     assert!(res.is_failure(), "a ninth credential was registered: {res:#?}");
     let msg = why(res);
     assert!(msg.contains("too many active credentials"), "refused, but not for the cap: {msg}");
 
     // Free one, and the ninth fits.
     remove_credential(&fx, &fx.admin, &keys[0]).await?.into_result()?;
-    register(&fx, &ninth).await?;
+    register_passkey_via(&fx, &keys[1], &ninth).await?;
     let usable: Vec<String> = fx.wallet.view("credential_ids").await?.json()?;
     assert_eq!(usable.len(), 8);
     assert!(usable.contains(&STANDARD.encode(&ninth.credential_id)));

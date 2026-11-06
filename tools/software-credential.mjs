@@ -6,8 +6,8 @@
 //   node tools/software-credential.mjs sign <key-file> <challenge-base64>
 //       prints an assertion in the shape `set_rule` / `withdraw` take, signed over that challenge
 //
-// The contract cannot tell this from a hardware passkey, which is why `register_credential` is
-// admin-only. Use it for shakedowns and tests; a real demo registers a real device credential
+// The contract cannot tell this from a hardware passkey, which is why only the FIRST
+// `register_credential` is admin-alone and every later one needs a signature from a registered one. Use it for shakedowns and tests; a real demo registers a real device credential
 // (tools/capture-assertion.html). Keep <key-file> outside the repo: it is a private key.
 
 import { createHash, webcrypto } from "node:crypto";

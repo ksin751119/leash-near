@@ -352,6 +352,49 @@ async fn an_allowed_payment_transfers_and_settles() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Spent budget comes back only through an accepted loosening. Re-applying the identical rule, or
+/// a tightening, as the admin with no assertion, must leave the spent figure exactly where it is;
+/// that used to be a free refill. Checked on the chain's own `spent_in_period` after a real payment.
+#[tokio::test]
+async fn re_applying_the_same_rule_does_not_refill_a_spent_budget() -> anyhow::Result<()> {
+    let (fx, pk, ag) = ready().await?;
+    let token = fx.token.id().to_string();
+    let agent = restricted_key(&fx, &ag.pay).await?;
+    let unsigned = |r: Rule| {
+        let (fx, node) = (&fx, ag.node.clone());
+        async move {
+            fx.admin
+                .call(fx.wallet.id(), "set_rule")
+                .args_json(json!({ "node": node, "rule": rule_json(&r) }))
+                .max_gas()
+                .transact()
+                .await
+        }
+    };
+
+    assert!(spend(&fx, &agent, &token, ALICE, 750).await?.is_success());
+    assert_eq!(spent_in_period(&fx, &ag.node).await?, 750);
+
+    // The identical rule, five times over, with no assertion: accepted (it is not a loosening) and
+    // it frees nothing.
+    for _ in 0..5 {
+        let res = unsigned(base_rule(&token)).await?;
+        assert!(res.is_success(), "re-applying the same rule was refused: {res:#?}");
+        assert_eq!(spent_in_period(&fx, &ag.node).await?, 750, "re-applying the same rule changed the spent figure");
+    }
+    // A tightening in between changes nothing either.
+    let tighter = rule(&token, 900, 9_000, DAY, 0, u64::MAX, &[ALICE], false);
+    assert!(unsigned(tighter.clone()).await?.is_success());
+    assert_eq!(spent_in_period(&fx, &ag.node).await?, 750);
+    assert!(unsigned(tighter).await?.is_success());
+    assert_eq!(spent_in_period(&fx, &ag.node).await?, 750);
+
+    // Control: an accepted, signed loosening does refill it, which is the only thing that does.
+    set_rule_signed(&fx, &pk, &ag.node, &base_rule(&token)).await?;
+    assert_eq!(spent_in_period(&fx, &ag.node).await?, 0, "a signed widening did not open a fresh window");
+    Ok(())
+}
+
 /// A payment to a listed payee must never fail for an unregistered-receiver reason. The
 /// invariant is "on the list" means "can be paid": both `set_rule` and `add_payee` pay the
 /// token's `storage_deposit` before the payee reaches the list.

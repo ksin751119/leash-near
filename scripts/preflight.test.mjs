@@ -144,7 +144,7 @@ test("two credentials are required", async () => {
   const r = await run((w) => { w.views[`${F.WALLET}.credential_ids`] = () => [F.REAL]; });
   assert.equal(r.code, 1);
   assert.match(failing(r), /only 1 credential\(s\) registered; need at least 2/);
-  assert.match(failing(r), /funds are stuck forever/);
+  assert.match(failing(r), /strands the funds forever/);
 });
 
 test("the human gate: unnamed, unregistered, the software credential, never used, and a real use", async () => {
@@ -154,7 +154,7 @@ test("the human gate: unnamed, unregistered, the software credential, never used
   r = await run(() => {}, { env: { REAL_DEVICE_CREDENTIAL_ID: "nope==" } });
   assert.match(failing(r), /HUMAN GATE: REAL_DEVICE_CREDENTIAL_ID is not registered/);
   r = await run(() => {}, { env: { REAL_DEVICE_CREDENTIAL_ID: F.SOFT } });
-  assert.match(failing(r), /is the SOFTWARE credential/);
+  assert.match(failing(r), /recorded in .* as 'SOFTWARE P-256, shakedown only', not as a device/);
   r = await run((w) => { w.views[`${F.WALLET}.credential_nonce`] = () => 0; });
   assert.match(failing(r), /never produced an assertion the chain accepted/);
   r = await run((w) => { w.views[`${F.WALLET}.credential_nonce`] = () => null; });
@@ -162,6 +162,58 @@ test("the human gate: unnamed, unregistered, the software credential, never used
   r = await run();
   assert.match(r.out, /PASS  HUMAN GATE: credential .* has had 2 assertion\(s\) verified on chain/);
   assert.match(r.out, /that the device is real is YOUR claim/);
+});
+
+test("a credential the deployment file does not describe makes the gate fail, never go quiet", async () => {
+  const withDep = async (dep, mutate = () => {}) => {
+    const file = join(dir, `dep-${Math.random().toString(36).slice(2)}.json`);
+    writeFileSync(file, JSON.stringify(dep));
+    return run(mutate, { env: { LEASH_DEPLOYMENT: file } });
+  };
+  // No credential record at all: the software-credential check could never fire.
+  const { credentials, ...bare } = F.deployment;
+  let r = await withDep(bare);
+  assert.equal(r.code, 1);
+  assert.match(failing(r), /records no credentials, so the software-credential check cannot fire/);
+  assert.doesNotMatch(r.out, /PASS  HUMAN GATE/);
+  // A registered credential nobody described.
+  r = await withDep(F.deployment, (w) => { w.views[`${F.WALLET}.credential_ids`] = () => [F.REAL, F.SOFT, "MYSTERYcredential=="]; });
+  assert.match(failing(r), /does not record, so nobody has said what they are/);
+  // A named credential recorded with no kind.
+  r = await withDep({ ...F.deployment, credentials: [{ id: F.REAL }, F.deployment.credentials[1]] });
+  assert.match(failing(r), /not as a device/);
+  // The older single-record form still works, and still demands every registered id be described.
+  r = await withDep({ ...bare, credential: F.deployment.credentials[1] });
+  assert.match(failing(r), /HUMAN GATE: credentials are registered that .* does not record/);
+});
+
+test("whichever single read fails, preflight still finishes, says so, and is not ready", async () => {
+  const boom = { result: { error: "boom" } };
+  const cases = [
+    ["node_record", (w) => { w.raw[`${F.WALLET}.node_record`] = boom; }, /node record .* could not be read/],
+    ["is_paused", (w) => { w.raw[`${F.WALLET}.is_paused`] = boom; }, /is_paused could not be read/],
+    ["credential_ids", (w) => { w.raw[`${F.WALLET}.credential_ids`] = boom; }, /credential list could not be read/],
+    ["credential_nonce", (w) => { w.raw[`${F.WALLET}.credential_nonce`] = boom; }, /nonce could not be read/],
+    ["ft_balance_of", (w) => { w.raw[`${F.TOKEN}.ft_balance_of`] = boom; }, /token balance could not be read/],
+    ["ft_metadata", (w) => { w.raw[`${F.TOKEN}.ft_metadata`] = boom; }, /decimals could not be read/],
+    ["wallet keys", (w) => { w.raw[`keys:${F.WALLET}`] = { error: { code: -32000, message: "boom" } }; }, /wallet key list could not be read/],
+    ["agent keys", (w) => { w.raw[`keys:${F.ALPHA}`] = { error: { code: -32000, message: "boom" } }; }, /alpha.* key list could not be read/],
+    ["gas price", (w) => { w.gasPriceBroken = true; }, /gas price could not be read/],
+    ["node_record without a window", (w) => { w.views[`${F.WALLET}.node_record`] = () => ({ rule: F.scriptedRule(), epoch: 1, version: 1, spent: "0" }); }, /no usable window/],
+    ["node_record without spent", (w) => { w.views[`${F.WALLET}.node_record`] = () => ({ rule: F.scriptedRule(), epoch: 1, version: 1, window_began_ms: Date.now() - 60000 }); }, /not usable numbers/],
+  ];
+  const base = await run();
+  const baseChecks = Number(/(\d+) checks/.exec(base.out)[1]);
+  for (const [name, mutate, re] of cases) {
+    const r = await run(mutate);
+    assert.equal(r.code, 1, `${name}: expected exit 1\n${r.out}${r.err}`);
+    assert.match(r.out, /\d+ checks, \d+ failed/, `${name}: the run must reach its summary, not die half way`);
+    assert.doesNotMatch(r.out, /READY to record/, name);
+    assert.match(failing(r), re, `${name}: no FAIL line says why`);
+    assert.doesNotMatch(r.err, /unbound variable|syntax error|command not found/, `${name}: the shell itself failed: ${r.err}`);
+    const checks = Number(/(\d+) checks/.exec(r.out)[1]);
+    assert.ok(checks >= baseChecks - 6, `${name}: only ${checks} of ${baseChecks} checks ran`);
+  }
 });
 
 test("a missing argument is an error of the script, not a default", async () => {

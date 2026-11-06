@@ -56,7 +56,7 @@ rot silently. Run any one with `cargo test <test_name>` (Rust) or `node --test <
 | When several checks fail, the first in the documented order names the refusal. | `contract/src/spend.rs::the_first_failing_check_wins` |
 | An empty allow-list pays nobody, and a zero limit allows nothing (fail closed, never "unlimited"). | `contract/src/rule.rs::empty_payees_means_pay_nobody`, `contract/src/rule.rs::zero_limits_mean_zero_allowed_not_unlimited` |
 | An allowed payment moves the money and settles. | `tests-sandbox/tests/sandbox/spend.rs::an_allowed_payment_transfers_and_settles` |
-| Two agents on one budget cannot both spend the last of it, however the calls interleave. | `tests-sandbox/tests/sandbox/concurrency.rs::two_agents_cannot_both_spend_the_last_of_the_budget`, `tests-sandbox/tests/sandbox/concurrency.rs::four_concurrent_attempts_still_spend_the_budget_once` |
+| Two agents on one budget cannot both spend the last of it when their calls are sent at the same time (two-way and four-way concurrent submissions in the sandbox). | `tests-sandbox/tests/sandbox/concurrency.rs::two_agents_cannot_both_spend_the_last_of_the_budget`, `tests-sandbox/tests/sandbox/concurrency.rs::four_concurrent_attempts_still_spend_the_budget_once` |
 | The budget belongs to the node (the agents' common parent), not to either agent. | `tests-sandbox/tests/sandbox/concurrency.rs::the_budget_belongs_to_the_node_not_to_the_agent` |
 | A transfer that fails gives its reserved headroom back. | `tests-sandbox/tests/sandbox/spend.rs::a_failed_transfer_releases_the_reservation` |
 | A call with too little gas reserves nothing. | `tests-sandbox/tests/sandbox/spend.rs::too_little_gas_reserves_nothing` |
@@ -69,7 +69,7 @@ rot silently. Run any one with `cargo test <test_name>` (Rust) or `node --test <
 | Claim | Proved by |
 | --- | --- |
 | Tightening a rule needs no assertion. | `tests-sandbox/tests/sandbox/rules.rs::tightening_needs_no_assertion` |
-| Loosening a rule without an assertion is rejected, even from the admin. | `tests-sandbox/tests/sandbox/rules.rs::widening_without_assertion_is_rejected` |
+| Loosening any one field of a rule (per-transaction limit, period limit, a shorter period, an earlier window start, a later window end, an added or swapped payee, another token) without an assertion is rejected, even from the admin. | `tests-sandbox/tests/sandbox/rules.rs::widening_without_assertion_is_rejected` |
 | The first rule for a budget is a loosening and needs one. | `tests-sandbox/tests/sandbox/rules.rs::the_first_rule_for_a_node_needs_an_assertion` |
 | Swapping a payee for another counts as loosening, and so does every other field loosening. | `contract/src/rule.rs::swapping_a_payee_is_widening`, `contract/src/rule.rs::each_comparator_fires_for_its_own_field_only` |
 | An assertion is single-use. | `tests-sandbox/tests/sandbox/rules.rs::widening_with_replayed_assertion_is_rejected` |
@@ -79,7 +79,7 @@ rot silently. Run any one with `cargo test <test_name>` (Rust) or `node --test <
 | An assertion from an unregistered credential is rejected. | `tests-sandbox/tests/sandbox/rules.rs::an_unregistered_credential_cannot_widen` |
 | A tampered signature, a challenge for a different rule, or malformed data is rejected. | `contract/src/webauthn.rs::rejects_tampered_signature`, `contract/src/webauthn.rs::rejects_challenge_for_another_rule`, `tests-sandbox/tests/sandbox/widen_requires_passkey.rs::probe_rejects_assertions_that_must_not_pass` |
 | An assertion for one action cannot be used for another (rule, payee, unpause, withdraw). | `tests-sandbox/tests/sandbox/rules.rs::an_add_payee_assertion_cannot_set_a_rule`, `tests-sandbox/tests/sandbox/rules.rs::a_set_rule_assertion_cannot_add_a_payee`, `tests-sandbox/tests/sandbox/rules.rs::an_unpause_assertion_cannot_widen_a_rule`, `tests-sandbox/tests/sandbox/withdraw.rs::no_other_assertion_can_withdraw` |
-| Re-applying the same rule does not refill the budget; only an accepted loosening does. | `contract/src/state.rs::re_applying_the_same_rule_many_times_frees_nothing`, `tests-sandbox/tests/sandbox/rules.rs::a_tightening_bumps_nothing_and_keeps_the_ledger`, `tests-sandbox/tests/sandbox/rules.rs::a_widening_bumps_the_epoch_and_zeroes_the_ledger` |
+| Re-applying the same rule, or a tightening, leaves the spent figure exactly where it was after a real payment; only an accepted loosening refills it. | `tests-sandbox/tests/sandbox/spend.rs::re_applying_the_same_rule_does_not_refill_a_spent_budget`, `contract/src/state.rs::re_applying_the_same_rule_many_times_frees_nothing` |
 | Pausing is free; unpausing needs the passkey. | `tests-sandbox/tests/sandbox/rules.rs::pausing_the_account_is_free_but_unpausing_needs_a_passkey`, `tests-sandbox/tests/sandbox/rules.rs::pausing_a_node_is_free_but_unpausing_needs_a_passkey` |
 | Adding a payee needs the passkey. | `tests-sandbox/tests/sandbox/rules.rs::adding_a_payee_without_an_assertion_is_impossible` |
 
@@ -87,7 +87,12 @@ rot silently. Run any one with `cargo test <test_name>` (Rust) or `node --test <
 
 | Claim | Proved by |
 | --- | --- |
-| Only the admin can register a credential, and an agent's key cannot. | `tests-sandbox/tests/sandbox/rules.rs::register_credential_is_admin_only`, `tests-sandbox/tests/sandbox/rules.rs::an_agent_function_call_key_cannot_register_a_credential` |
+| The first credential is registered by the admin alone and by nobody else; an agent's key cannot register one. | `tests-sandbox/tests/sandbox/rules.rs::register_credential_is_admin_only`, `tests-sandbox/tests/sandbox/rules.rs::an_agent_function_call_key_cannot_register_a_credential` |
+| **The admin key alone cannot register a second credential**, with no assertion or with a self-signed one, and so cannot widen a rule with a credential of its own. | `tests-sandbox/tests/sandbox/rules.rs::the_admin_key_alone_cannot_register_a_second_credential` |
+| A registered credential can authorise a second one, and the new one then works. | `tests-sandbox/tests/sandbox/rules.rs::a_registered_credential_can_authorise_a_second_one` |
+| A registration assertion binds the exact new id and key and works once. | `tests-sandbox/tests/sandbox/rules.rs::a_registration_assertion_binds_the_new_key_and_is_single_use`, `contract/src/challenge.rs::a_registration_challenge_has_its_own_tag_and_binds_the_new_key` |
+| A registration assertion cannot do anything else, and no other action's assertion can register. | `tests-sandbox/tests/sandbox/rules.rs::a_registration_assertion_cannot_do_anything_else_and_nothing_else_registers` |
+| Removing every credential does not reopen the admin-alone bootstrap. | `tests-sandbox/tests/sandbox/rules.rs::removing_every_credential_does_not_reopen_the_bootstrap` |
 | A credential id cannot be registered twice (that would reset its nonce and re-arm old assertions). | `tests-sandbox/tests/sandbox/rules.rs::a_credential_cannot_be_re_registered` |
 | A removed credential can no longer authorise anything, and its slot can be reused. | `tests-sandbox/tests/sandbox/rules.rs::a_removed_credential_cannot_authorise_a_widening`, `tests-sandbox/tests/sandbox/rules.rs::removing_a_credential_frees_a_slot_for_a_new_one` |
 | Withdrawal needs the passkey every time, and only the admin can ask. | `tests-sandbox/tests/sandbox/withdraw.rs::withdraw_without_an_assertion_is_rejected`, `tests-sandbox/tests/sandbox/withdraw.rs::only_the_admin_may_withdraw_even_with_a_valid_assertion` |
@@ -113,7 +118,9 @@ rot silently. Run any one with `cargo test <test_name>` (Rust) or `node --test <
 | Preflight fails unless the beats would come out as scripted, with the headroom for exactly them. | `scripts/preflight.test.mjs::"the rule must be the scripted one, with headroom for exactly the beats"` |
 | Preflight names the agent process that does not answer. | `scripts/preflight.test.mjs::"an agent process that does not answer is named, and the other is not"` |
 | Preflight requires two credentials, and a named real-device credential that has had an assertion verified. | `scripts/preflight.test.mjs::"two credentials are required"`, `scripts/preflight.test.mjs::"the human gate: unnamed, unregistered, the software credential, never used, and a real use"` |
-| Preflight never turns a missing value into a pass. | `scripts/preflight.test.mjs::"when no endpoint answers every chain check fails, none passes"`, `scripts/preflight.test.mjs::"the script contains no silent zero default"` |
+| Whichever single chain read fails or comes back incomplete, preflight still finishes, names the failure and is not ready; with no endpoint at all no chain check passes. | `scripts/preflight.test.mjs::"whichever single read fails, preflight still finishes, says so, and is not ready"`, `scripts/preflight.test.mjs::"when no endpoint answers every chain check fails, none passes"` |
+| The human gate cannot go quiet: a deployment file that does not describe the registered credentials fails it. | `scripts/preflight.test.mjs::"a credential the deployment file does not describe makes the gate fail, never go quiet"` |
+| Registering a credential from the script follows the contract's rule: bootstrap by the admin, later ones signed. | `scripts/register-credential.test.mjs::"a later credential needs a signature from a registered one, and waits for it saying so"` |
 | A demo reset costs one face scan per widening step, none for a tightening, and never reuses an assertion. | `scripts/reset-demo.test.mjs::"scripted rule but money spent: a widening to reopen the window, then a tightening with no prompt"`, `scripts/reset-demo.test.mjs::"a stale assertion left in the directory is moved aside, not reused"` |
 | The demo script's sentences, rule and outcomes agree with the parser and the payment predictor. | `scripts/demo-script.test.mjs::"replayed from nothing spent, the beats come out as scripted, every refusal with its code"` |
 
@@ -124,20 +131,35 @@ credential signed this exact challenge, and that the authenticator asserted user
 It **cannot** prove the credential is hardware-backed: WebAuthn attestation is absent for synced
 passkeys (iCloud Keychain and Google Password Manager attest `none`), so the contract cannot tell a
 secure enclave from a P-256 key made by a script. **The guarantee is therefore only as strong as
-registration, and registration is admin-only.** Whoever registers a credential vouches that it is a
-real authenticator. Even a genuine device does not prove a unique person: anyone enrolled on it
-satisfies the check. This is why `scripts/preflight.sh` has a human gate before recording: it checks
-that the credential you name has had an assertion verified on chain, and the claim that the device
-is real is yours.
+registration.** Whoever registers the first credential vouches that it is a real authenticator, and
+that first registration is the one act of trust in the design: it is made by the admin alone, because
+nothing exists yet to sign for it. Every later credential needs the admin **and** a signature from a
+credential that is already registered, over exactly the new key, so the admin key cannot add one on
+its own. Even a genuine device does not prove a unique person: anyone enrolled on it satisfies the
+check. This is why `scripts/preflight.sh` has a human gate before recording: it checks that the
+credential you name has had an assertion verified on chain, and the claim that the device is real is
+yours.
+
+### What a stolen admin key can and cannot do
+
+It **can** tighten any rule, pause the account or a budget, remove payees, and remove credentials. It
+**cannot** widen a rule, add a payee, unpause, withdraw, or mint itself a credential: each of those
+needs a signature from a registered passkey, and adding a passkey needs one too. Proved by
+`the_admin_key_alone_cannot_register_a_second_credential` and the loosening tests above. The one
+exception is time: before the first credential is registered, the admin key is the only thing that
+decides which key the gate will trust, so register it on a machine you trust.
 
 ### Lose every credential and the funds are stuck
 
-Withdrawal is passkey-gated, and the wallet is frozen (no keys, no code changes). There is no
-backdoor and no recovery path around the passkey. **If every registered credential is lost, the
-funds in the wallet are stuck forever.** Register at least two, on different devices or with one kept
-offline; `scripts/preflight.sh` fails if fewer than two are registered. A lost credential can be
-revoked (`remove_credential`, admin-only, tested above) and replaced, but only while another one still
-works.
+Withdrawal is passkey-gated, the wallet is frozen (no keys, no code changes), and a new credential can
+only be added with a signature from an existing one. Removing a credential is not gated (it only takes
+capability away), and the first-registration bootstrap does not reopen once any credential has
+existed. So **if every registered credential is lost or removed, the funds in the wallet are stuck
+forever**, and nobody, the admin included, can register a replacement. A stolen admin key can cause
+exactly that by removing the credentials; it still cannot take the money. **Register two credentials,
+on different devices or with one kept offline** (`scripts/register-credential.sh`);
+`scripts/preflight.sh` fails if fewer than two are registered. A lost credential can be removed and
+replaced while another one still works.
 
 ## Measured gas
 
@@ -200,8 +222,8 @@ Last run, on this branch:
 
 | Command | Result |
 | --- | --- |
-| `cargo test` | 208 passed, 0 failed: 118 contract unit tests, 90 sandbox tests (frozen account 3, concurrency 4, keys 8, rules 39, spend 21, token 1, passkey verification 2, withdraw 12) |
-| `node --test agent/*.test.mjs web/*.test.mjs scripts/*.test.mjs` | 295 passed, 0 failed, 0 skipped: 256 in `agent/` and `web/`, 39 in `scripts/` |
+| `cargo test` | 215 passed, 0 failed: 119 contract unit tests, 96 sandbox tests (frozen account 3, concurrency 4, keys 8, rules 44, spend 22, token 1, passkey verification 2, withdraw 12) |
+| `node --test agent/*.test.mjs web/*.test.mjs scripts/*.test.mjs` | 302 passed, 0 failed, 0 skipped: 256 in `agent/` and `web/`, 46 in `scripts/` |
 
 To see a gas figure: `cargo test --test spend -- --nocapture` (also `rules`, `widen_requires_passkey`,
 `withdraw`). The fixtures under `tests-sandbox/tests/fixtures/` are generated, not browser-captured

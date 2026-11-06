@@ -40,8 +40,10 @@ test("every row of a claims table carries a test reference", () => {
 test("the passkey wording is never alone: the caveat sits in the same section as the claim", () => {
   const text = readme.replace(/\s+/g, " ");
   assert.match(text, /cannot\*\* prove the credential is hardware-backed/);
-  assert.match(text, /only as strong as registration, and registration is admin-only/);
-  assert.match(text, /If every registered credential is lost, the funds in the wallet are stuck forever/);
+  assert.match(text, /only as strong as registration\.\*\*/);
+  assert.match(text, /the admin key cannot add one on its own/);
+  assert.match(text, /\*\*cannot\*\* widen a rule, add a payee, unpause, withdraw, or mint itself a credential/);
+  assert.match(text, /if every registered credential is lost or removed, the funds in the wallet are stuck forever/);
   assert.doesNotMatch(text, /a unique human/i);
 });
 

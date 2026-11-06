@@ -266,6 +266,7 @@ pub const ACTION_SET_RULE: &str = "leash:set_rule:v1";
 pub const ACTION_ADD_PAYEE: &str = "leash:add_payee:v1";
 pub const ACTION_UNPAUSE: &str = "leash:unpause:v1";
 pub const ACTION_WITHDRAW: &str = "leash:withdraw:v1";
+pub const ACTION_REGISTER: &str = "leash:register_credential:v1";
 
 /// `sha256(len(action) ‖ action ‖ len(payload) ‖ payload ‖ nonce ‖ len(contract) ‖ contract)`,
 /// written out here independently of the contract. Lengths are `u32` little-endian, the
@@ -290,6 +291,18 @@ pub fn set_rule_payload(node: &str, rule: &leash_contract::rule::Rule) -> Vec<u8
     p.extend_from_slice(&(node.len() as u32).to_le_bytes());
     p.extend_from_slice(node.as_bytes());
     p.extend_from_slice(&near_sdk::borsh::to_vec(rule).expect("a Rule always serialises"));
+    p
+}
+
+/// What registering a credential signs over: `u32le(len(id)) ‖ id ‖ u32le(len(pubkey)) ‖ pubkey ‖
+/// u64le(initial nonce)`. Everything about the new credential is bound.
+pub fn register_payload(id: &[u8], pubkey_sec1: &[u8], nonce: u64) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&(id.len() as u32).to_le_bytes());
+    p.extend_from_slice(id);
+    p.extend_from_slice(&(pubkey_sec1.len() as u32).to_le_bytes());
+    p.extend_from_slice(pubkey_sec1);
+    p.extend_from_slice(&nonce.to_le_bytes());
     p
 }
 
@@ -372,6 +385,43 @@ pub async fn register_passkey(fx: &Fixture, pk: &Passkey) -> anyhow::Result<()> 
         .await?
         .into_result()?;
     Ok(())
+}
+
+/// Register `new` as a SECOND (or later) credential, the only way the contract allows: ADMIN calls
+/// it and an already-registered credential, `sponsor`, signs for the exact new key.
+pub async fn register_passkey_via(fx: &Fixture, sponsor: &Passkey, new: &Passkey) -> anyhow::Result<()> {
+    register_attempt(fx, &fx.admin, new, Some(sign_registration(fx, sponsor, new).await?))
+        .await?
+        .into_result()?;
+    Ok(())
+}
+
+/// `sponsor` signs the registration of `new` at its current nonce.
+pub async fn sign_registration(fx: &Fixture, sponsor: &Passkey, new: &Passkey) -> anyhow::Result<AssertionJson> {
+    let nonce = nonce_of(fx, sponsor).await?;
+    Ok(sponsor.assert_over(&gate_challenge(
+        ACTION_REGISTER,
+        &register_payload(&new.credential_id, &new.pubkey_sec1(), 0),
+        nonce,
+        fx.wallet.id().as_str(),
+    )))
+}
+
+/// Call `register_credential` as `caller`, with or without an assertion, without asserting success.
+pub async fn register_attempt(
+    fx: &Fixture,
+    caller: &Account,
+    new: &Passkey,
+    assertion: Option<AssertionJson>,
+) -> anyhow::Result<near_workspaces::result::ExecutionFinalResult> {
+    let mut args = new.registration();
+    args["assertion"] = serde_json::json!(assertion);
+    Ok(caller
+        .call(fx.wallet.id(), "register_credential")
+        .args_json(args)
+        .max_gas()
+        .transact()
+        .await?)
 }
 
 /// The nonce the credential's next challenge must carry.

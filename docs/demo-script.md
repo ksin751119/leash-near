@@ -131,7 +131,7 @@ back at the scripted rule with nothing spent; `scripts/preflight.sh` is green ag
 What the passkey step does and does not prove, if you are asked: the contract verifies that the
 holder of a registered credential signed this exact challenge and that the authenticator asserted
 user verification. It cannot prove the credential is hardware-backed, because there is no
-attestation; so it is only as strong as registration, which only the admin can do.
+attestation; so it is only as strong as registration: the first credential is registered by the admin alone, and every later one needs a signature from one that already exists.
 
 ## If something goes wrong
 
@@ -140,7 +140,7 @@ attestation; so it is only as strong as registration, which only the admin can d
 | A card says "could not reach the chain" | The agent could not confirm the send. It is not a refusal. | Wait a few seconds; the card settles from the chain's log or the transaction hash. |
 | A card says REFUSED but you expected ALLOWED | Read the code. 6 means the budget is spent. | `scripts/preflight.sh` tells you what is left; `reset-demo.sh` refills it. |
 | The agent answers with a question | The sentence is outside the grammar. | Type exactly the sentence in `safe-phrasings.md`. |
-| `preflight.sh` fails on the human gate | No real-device credential has been named, or it has never signed. | Register it, run `reset-demo.sh` with it, set `REAL_DEVICE_CREDENTIAL_ID`. |
+| `preflight.sh` fails on the human gate | No real-device credential has been named, or it has never signed. | Register it, record it in `deployments/testnet.json` (`credentials`), run `reset-demo.sh` with it, set `REAL_DEVICE_CREDENTIAL_ID`. |
 
 ## Setting up a deployment
 
@@ -152,17 +152,20 @@ What the scripts cover and what they do not. Names below are the ones in `deploy
 2. Build and deploy: `scripts/build-contract.sh test-token` and deploy it to the token account with
    `new {owner_id, total_supply, decimals: 6}`, then `storage_deposit` for the wallet and every payee
    and `ft_transfer` the funding amount to the wallet. Then `scripts/deploy.sh <wallet> <admin> <token> testnet`.
-3. Register at least two credentials, as the admin: `register_credential` with
-   `{"cred": {"id": "<base64>", "pubkey_sec1": "<base64>"}}`. One is the real device (made with
-   `tools/capture-assertion.html`, step 1). The other is a second device or a recovery credential kept
-   somewhere else: withdrawal is passkey-gated and the wallet will be frozen, so **if every credential
-   is lost the funds are stuck for good.**
+3. Register at least two credentials with `scripts/register-credential.sh testnet <credential.json>`
+   (the JSON `tools/capture-assertion.html` saves after step 1 works as it is). **The first one is
+   the real device, and it is the bootstrap**: the admin registers it alone, because nothing exists
+   yet to sign for it. That is the one act of trust in the design; do it on a machine you trust. The
+   second is a second device or a recovery credential kept somewhere else, and it needs a signature
+   from the first (the script prints a challenge and waits for a face scan): **the admin key alone
+   cannot add a credential.** Removal is not gated, so **if every credential is lost the funds are
+   stuck for good** and nobody can add a replacement.
 4. Give each agent its key: the agent generates its keypair and hands over only the public key.
    `scripts/grant-agent-key.sh <wallet> <agent-account> <ed25519:public-key> testnet`. The agent's
    secret goes in `~/.leash-testnet/akf-<name>.json`, mode 600.
 5. Freeze the wallet: `scripts/freeze.sh <wallet> testnet --yes-i-mean-it`. Irreversible.
 6. Record the accounts in `deployments/testnet.json` (including `funded_wallet_balance`, the base
-   units you funded the wallet with) and `agent/vendors.json`. The tests read both files, so nothing else needs editing.
+   units you funded the wallet with, and `credentials`: `[{"id": ..., "kind": "DEVICE ..." or "SOFTWARE ..."}]` for every registered credential, which preflight needs) and `agent/vendors.json`. The tests read both files, so nothing else needs editing.
 7. Run the test suites, then the steps under "Before you record".
 
 The first rule for the budget node is applied by `reset-demo.sh`, not by hand, so the rule

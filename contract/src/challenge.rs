@@ -33,13 +33,14 @@
 //! different inputs can produce the same byte string. (Dropping the lengths would not be
 //! safe — `"ab" ‖ "c"` and `"a" ‖ "bc"` are the same bytes.)
 //!
-//! # The four actions
+//! # The five actions
 //!
 //! | Action | Tag | Payload | What it authorises |
 //! | --- | --- | --- | --- |
 //! | set a rule | [`ACTION_SET_RULE`] | `u32le(len(node)) ‖ node ‖ borsh(rule)` | `set_rule`, which **resets the spend ledger** |
 //! | add a payee | [`ACTION_ADD_PAYEE`] | the same | `add_payee`, which **leaves the ledger alone** |
 //! | unpause the account | [`ACTION_UNPAUSE`] | empty | `set_paused(false)` |
+//! | register another credential | [`ACTION_REGISTER`] | `u32le(len(id)) ‖ id ‖ u32le(len(pubkey)) ‖ pubkey ‖ u64le(nonce)` | `register_credential`, once any credential has ever been registered |
 //! | withdraw | [`ACTION_WITHDRAW`] | `u32le(len(token)) ‖ token ‖ u32le(len(to)) ‖ to ‖ u128le(amount)` | `withdraw`, money leaving outside every rule |
 //!
 //! `set_rule` and `add_payee` sign over the same payload but under **different tags**, and
@@ -103,6 +104,8 @@
 //!   resulting rule from stored state, so a client cannot get that part wrong
 //! - `challenge_for_unpause(credential_id)` — for `set_paused(false)`
 //! - `challenge_for_withdraw(to, amount, credential_id)` — for `withdraw`
+//! - `challenge_for_register(cred, credential_id)` — for `register_credential` once a credential
+//!   exists; `credential_id` is the existing credential that signs
 //!
 //! `tools/capture-assertion.html` and the demo page both call these, and
 //! `challenge_for_matches_the_documented_layout` in the sandbox tests checks the first
@@ -130,6 +133,11 @@ pub const ACTION_UNPAUSE: &str = "leash:unpause:v1";
 /// Action tag for `withdraw`. The payload commits to the token, the recipient and the amount,
 /// so a signature for one withdrawal cannot be stretched to a bigger one or pointed elsewhere.
 pub const ACTION_WITHDRAW: &str = "leash:withdraw:v1";
+
+/// Action tag for `register_credential` once a credential exists. The payload commits to the new
+/// credential's id, public key and starting nonce, so an assertion cannot be stretched to
+/// register any other key.
+pub const ACTION_REGISTER: &str = "leash:register_credential:v1";
 
 /// `u32le(len) ‖ bytes`.
 fn push_len_prefixed(out: &mut Vec<u8>, bytes: &[u8]) {
@@ -163,6 +171,17 @@ pub fn withdraw_payload(token: &AccountId, to: &AccountId, amount: u128) -> Vec<
     push_len_prefixed(&mut payload, token.as_bytes());
     push_len_prefixed(&mut payload, to.as_bytes());
     payload.extend_from_slice(&amount.to_le_bytes());
+    payload
+}
+
+/// The payload registering a credential commits to: `u32le(len(id)) ‖ id ‖ u32le(len(pubkey)) ‖
+/// pubkey ‖ u64le(initial nonce)`. Everything about the new credential is bound, so the
+/// signature authorises exactly this key and no other.
+pub fn register_payload(id: &[u8], pubkey_sec1: &[u8], nonce: u64) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(16 + id.len() + pubkey_sec1.len());
+    push_len_prefixed(&mut payload, id);
+    push_len_prefixed(&mut payload, pubkey_sec1);
+    payload.extend_from_slice(&nonce.to_le_bytes());
     payload
 }
 
@@ -286,6 +305,24 @@ mod tests {
         assert_ne!(withdraw, gate_challenge(ACTION_UNPAUSE, &w, 0, &c));
     }
 
+    /// Registering a credential is its own action: its signature cannot be lifted from, or into,
+    /// any other operation, and it binds the new key completely.
+    #[test]
+    fn a_registration_challenge_has_its_own_tag_and_binds_the_new_key() {
+        let c = acct(C);
+        let ch = |id: &[u8], pk: &[u8], n: u64| gate_challenge(ACTION_REGISTER, &register_payload(id, pk, n), 0, &c);
+        let base = ch(b"id", b"pubkey", 0);
+        assert_ne!(base, ch(b"id2", b"pubkey", 0));
+        assert_ne!(base, ch(b"id", b"pubkey2", 0));
+        assert_ne!(base, ch(b"id", b"pubkey", 1));
+        // The boundary between id and pubkey is length-prefixed: moving a byte across it differs.
+        assert_ne!(ch(b"ab", b"c", 0), ch(b"a", b"bc", 0));
+        let p = register_payload(b"id", b"pubkey", 0);
+        for other in [ACTION_SET_RULE, ACTION_ADD_PAYEE, ACTION_UNPAUSE, ACTION_WITHDRAW] {
+            assert_ne!(base, gate_challenge(other, &p, 0, &c), "{other} shares a challenge with registration");
+        }
+    }
+
     #[test]
     fn a_withdrawal_challenge_binds_token_recipient_and_amount() {
         let (t, a, b) = (acct("usdc.testnet"), acct("alice.testnet"), acct("bob.testnet"));
@@ -303,7 +340,7 @@ mod tests {
     /// length prefix no tag could shadow another. Both belts, checked.
     #[test]
     fn no_action_tag_is_a_prefix_of_another() {
-        let tags = [ACTION_SET_RULE, ACTION_ADD_PAYEE, ACTION_UNPAUSE, ACTION_WITHDRAW];
+        let tags = [ACTION_SET_RULE, ACTION_ADD_PAYEE, ACTION_UNPAUSE, ACTION_WITHDRAW, ACTION_REGISTER];
         for (i, a) in tags.iter().enumerate() {
             for (j, b) in tags.iter().enumerate() {
                 if i != j {

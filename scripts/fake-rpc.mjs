@@ -19,7 +19,10 @@ export const deployment = {
   network: "testnet", admin: ADMIN, wallet: WALLET, token: TOKEN, budget_node: NODE,
   payees: [PAY1, PAY2],
   agents: { [ALPHA]: "ed25519:alpha", [BETA]: "ed25519:beta" },
-  credential: { id: SOFT, kind: "SOFTWARE P-256, shakedown only" },
+  credentials: [
+    { id: REAL, kind: "DEVICE (passkey on a phone)" },
+    { id: SOFT, kind: "SOFTWARE P-256, shakedown only" },
+  ],
   funded_wallet_balance: "500000000",
 };
 export const vendors = [
@@ -63,6 +66,7 @@ export function startRpc(world) {
       hits.push(method);
       const reply = (o) => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ jsonrpc: "2.0", id, ...o })); };
       if (world.rateLimitFirst && hits.length === 1) { res.writeHead(429); return res.end("Too Many Requests"); }
+      if (method === "gas_price" && world.gasPriceBroken) return reply({ error: { code: -32000, message: "boom" } });
       if (method === "gas_price") return reply({ result: { gas_price: world.gasPrice } });
       const p = params;
       if (p.request_type === "view_access_key_list") {

@@ -93,15 +93,23 @@ Two further facts that shape the API:
 ### What ADMIN cannot do
 
 ADMIN can repoint rules and mint agent accounts. ADMIN **cannot move the money**: it holds no
-key on `wallet.leash.testnet`, and the wallet account has no key at all for anyone to steal. ADMIN also cannot widen a rule alone — widening needs the passkey.
+key on `wallet.leash.testnet`, and the wallet account has no key at all for anyone to steal. ADMIN also cannot widen a rule alone — widening needs the passkey — and that holds only because
+**ADMIN cannot add a credential alone either**: after the first credential, `register_credential`
+needs an assertion from one already registered (see "Credential registration" below). Without that,
+a stolen admin key could register its own software credential and then sign any widening or
+withdrawal with it. What a stolen admin key CAN do: tighten rules, pause, remove payees, and remove credentials
+(which can strand the funds, never steal them). What it cannot do: widen, withdraw, or mint itself a credential.
 
 ### The honest boundary
 
 Owner recovery goes through `withdraw`, which is gated exactly like a widening: passkey
-signature required. There is no backdoor and no recovery path that skips it. **If the passkey
-credential is lost, the funds are stuck.** This is stated plainly in the README rather than
-papered over; for a hackathon testnet demo it is the right trade, and the mitigation
-(register two credentials) is one line of state.
+signature required. There is no backdoor and no recovery path that skips it. **If every
+registered credential is lost, the funds are stuck**, and nobody can mint a replacement, because a
+new credential has to be signed for by an existing one. Removal is ungated (it only takes capability
+away), so a stolen admin key could also strand the funds by removing every credential; it still
+cannot take them. This is stated plainly in the README rather than papered over; for a hackathon
+testnet demo it is the right trade, and the mitigation is real now: register two credentials, on
+different devices.
 
 ---
 
@@ -256,8 +264,10 @@ it back:
 - **The account-wide pause.** `set_paused(true)` is ADMIN-only and ungated; `set_paused(false)`
   needs an assertion, signed under its own action tag. Refusal code 2 means paused-by-account
   **or** paused-by-rule.
-- **Credential registration and removal.** `register_credential` is ADMIN-only (it is the trust
-  boundary — see below); `remove_credential` is ADMIN-only and ungated, because removing a
+- **Credential registration and removal.** `register_credential` is ADMIN-only for the very first
+  credential and ADMIN **plus an assertion from an existing credential** for every later one, under
+  its own action tag over the new credential's id, key and nonce (it is the trust boundary — see
+  below); `remove_credential` is ADMIN-only and ungated, because removing a
   credential only takes capability away. Removal has to exist: without it the cap on
   credentials would be a *lifetime* budget on an account whose code cannot be redeployed, and
   after enough rotations no loosening would ever be possible again. A removed credential is
@@ -324,7 +334,11 @@ signature this contract accepts. A reviewer demonstrated exactly that against ou
 
 So the guarantee is only as strong as the **registration step**: whoever registers a
 credential vouches that it is a real authenticator. That makes admin-only credential
-registration a security requirement, not a convenience.
+registration a security requirement, not a convenience. And it has to bind the admin key too:
+**the first credential is registered by the admin alone (the bootstrap, the one unavoidable act of
+trust, documented as such), and every later credential needs an assertion from a registered one.**
+"First" means first ever, revoked credentials included, so removing every credential does not reopen
+the bootstrap. `the_admin_key_alone_cannot_register_a_second_credential` pins it.
 
 ### `#[private]` is not relied on alone
 
@@ -462,4 +476,4 @@ Each is a README line under "what we would build next", with the reason.
 
 Whether the ADMIN key and the passkey credential should be allowed to be the same human in
 the demo. They are in practice (it is one person), but the narration should be explicit that
-they are separate *capabilities* — stolen ADMIN key alone cannot widen anything.
+they are separate *capabilities* — stolen ADMIN key alone cannot widen anything, withdraw, or register a credential of its own.

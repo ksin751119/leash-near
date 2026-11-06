@@ -207,10 +207,14 @@ else
     # Replay the beats against what is on chain, in the contract's own check order (paused 2,
     # payee 4, per-tx 5, period 6) and say how many of each beat fit.
     now_ms=$(($(date +%s%N) / 1000000))
-    began=$(jq -r '.window_began_ms' <<<"$rec") period_ms=$(jq -r '.rule.period_ms' <<<"$rec")
-    left_ms=$((began + period_ms - now_ms))
-    if [[ $left_ms -ge $MIN_WINDOW_LEFT_MS ]]; then pass "the budget window has $((left_ms / 60000)) minutes left, so it will not refill mid-recording"
-    else fail "the budget window ends in $((left_ms / 60000)) minutes; it would refill (spent resets to 0) during a take" "run scripts/reset-demo.sh testnet to open a fresh window"; fi
+    began=$(jq -r '.window_began_ms // empty' <<<"$rec") period_ms=$(jq -r '.rule.period_ms // empty' <<<"$rec")
+    if ! digits "$began" || ! digits "$period_ms"; then
+      fail "the node record has no usable window (window_began_ms '$began', period_ms '$period_ms'), so the window cannot be judged" "$(jq -c . <<<"$rec" | cut -c1-200)"
+    else
+      left_ms=$((began + period_ms - now_ms))
+      if [[ $left_ms -ge $MIN_WINDOW_LEFT_MS ]]; then pass "the budget window has $((left_ms / 60000)) minutes left, so it will not refill mid-recording"
+      else fail "the budget window ends in $((left_ms / 60000)) minutes; it would refill (spent resets to 0) during a take" "run scripts/reset-demo.sh testnet to open a fresh window"; fi
+    fi
 
     replay=$(jq -r --argjson r "$have_rule" --argjson spent "$spent" --arg admin "$ADMIN" --slurpfile v "$VENDORS" '
       ($v[0] | map({(.id): .account}) | add) as $by
@@ -252,8 +256,12 @@ fi
 # ---- 4. the token balance --------------------------------------------------------------------
 
 outflow=$(jq '[.beats[] | select(.expect == "allowed") | .amount | tonumber] | add' "$BEATS")
-if dec=$(view "$TOKEN" ft_metadata '{}') && [[ $(jq -r '.decimals' <<<"$dec") != 6 ]]; then
-  fail "the token has $(jq -r '.decimals' <<<"$dec") decimals; the beats are written in 6-decimal amounts"
+if ! dec=$(view "$TOKEN" ft_metadata '{}'); then
+  fail "the token's decimals could not be read, so the beats' amounts cannot be trusted" "$(lasterr)"
+elif [[ $(jq -r '.decimals // "missing"' <<<"$dec") != 6 ]]; then
+  fail "the token has $(jq -r '.decimals // "no"' <<<"$dec") decimals; the beats are written in 6-decimal amounts"
+else
+  pass "the token has 6 decimals, as the beats' amounts assume"
 fi
 if bal=$(view "$TOKEN" ft_balance_of "{\"account_id\":\"$WALLET\"}"); then
   bal=$(jq -r . <<<"$bal")
@@ -291,11 +299,22 @@ if ids=$(view "$WALLET" credential_ids '{}'); then
   count=$(jq 'length' <<<"$ids")
   if [[ $count -ge 2 ]]; then pass "$count credentials are registered (a lost passkey does not freeze the funds)"
   else fail "only $count credential(s) registered; need at least 2" \
-    "withdrawal is passkey-gated and the wallet is frozen: lose the only credential and the funds are stuck forever" \
-    "register a second one (register_credential, admin only) before you record"; fi
+    "withdrawal is passkey-gated, the wallet is frozen, and a second credential can only be registered with a signature from one that already exists" \
+    "so losing the only credential strands the funds forever: register a second one now (scripts/register-credential.sh)"; fi
 
   # ---- 7. the human gate -----------------------------------------------------------------------
-  if [[ -z ${REAL_DEVICE_CREDENTIAL_ID:-} ]]; then
+  # The deployment file records what each registered credential is (`credentials: [{id, kind}]`,
+  # or the older single `credential`). Without that record the software-credential check cannot
+  # fire, so a missing record is itself a failure, as is a registered credential nobody recorded.
+  records=$(jq -c '((.credentials // []) + (if .credential then [.credential] else [] end))' "$DEPLOYMENT")
+  unrecorded=$(jq -nc --argjson ids "$ids" --argjson r "$records" '[$ids[] | select(. as $i | ($r | map(.id) | index($i)) == null)]')
+  if [[ $(jq 'length' <<<"$records") -eq 0 ]]; then
+    fail "HUMAN GATE: $DEPLOYMENT records no credentials, so the software-credential check cannot fire" \
+      "add \"credentials\": [{\"id\": ..., \"kind\": \"DEVICE\" or \"SOFTWARE\"}, ...] for every credential registered on the wallet" \
+      "registered ids: $(jq -c . <<<"$ids")"
+  elif [[ $unrecorded != "[]" ]]; then
+    fail "HUMAN GATE: credentials are registered that $DEPLOYMENT does not record, so nobody has said what they are" "unrecorded: $unrecorded"
+  elif [[ -z ${REAL_DEVICE_CREDENTIAL_ID:-} ]]; then
     fail "HUMAN GATE: no real-device credential has been named" \
       "the contract cannot tell a phone's secure enclave from a script's key, so a person has to vouch" \
       "register the credential you made with tools/capture-assertion.html on a real device, use it once" \
@@ -304,16 +323,16 @@ if ids=$(view "$WALLET" credential_ids '{}'); then
   elif ! jq -e --arg c "$REAL_DEVICE_CREDENTIAL_ID" 'index($c) != null' <<<"$ids" >/dev/null; then
     fail "HUMAN GATE: REAL_DEVICE_CREDENTIAL_ID is not registered on $WALLET" "named: $REAL_DEVICE_CREDENTIAL_ID" "registered: $(jq -c . <<<"$ids")"
   else
-    soft=$(jq -r 'if (.credential.kind // "" | test("SOFTWARE")) then .credential.id else empty end' "$DEPLOYMENT")
-    if [[ -n $soft && $REAL_DEVICE_CREDENTIAL_ID == "$soft" ]]; then
-      fail "HUMAN GATE: the credential you named is the SOFTWARE credential recorded in $DEPLOYMENT" "that is a script's key, not a device"
+    kind=$(jq -r --arg c "$REAL_DEVICE_CREDENTIAL_ID" '.[] | select(.id == $c) | .kind // "unlabelled"' <<<"$records")
+    if [[ $kind == *SOFTWARE* || $kind == unlabelled ]]; then
+      fail "HUMAN GATE: the credential you named is recorded in $DEPLOYMENT as '$kind', not as a device" "that is a script's key (or an unlabelled one), not a device"
     elif ! nonce=$(view "$WALLET" credential_nonce "{\"credential_id\":\"$REAL_DEVICE_CREDENTIAL_ID\"}"); then
       fail "HUMAN GATE: the credential's nonce could not be read" "$(lasterr)"
     elif ! exact "$nonce" || [[ $nonce -lt 1 ]]; then
       fail "HUMAN GATE: the named credential has never produced an assertion the chain accepted (nonce '$nonce')" \
         "its first use is the set_rule in scripts/reset-demo.sh; run that with this credential's device"
     else
-      pass "HUMAN GATE: credential $REAL_DEVICE_CREDENTIAL_ID is registered and has had $nonce assertion(s) verified on chain"
+      pass "HUMAN GATE: credential $REAL_DEVICE_CREDENTIAL_ID is registered, recorded as '$kind', and has had $nonce assertion(s) verified on chain"
       note "the chain verified the signatures; that the device is real is YOUR claim (REAL_DEVICE_CREDENTIAL_ID). Did the face scan happen on a phone or laptop, not a script?"
     fi
   fi

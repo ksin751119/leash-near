@@ -7,8 +7,8 @@ pub mod state;
 pub mod webauthn;
 
 use crate::challenge::{
-    gate_challenge, set_rule_payload, withdraw_payload, ACTION_ADD_PAYEE, ACTION_SET_RULE,
-    ACTION_UNPAUSE, ACTION_WITHDRAW,
+    gate_challenge, register_payload, set_rule_payload, withdraw_payload, ACTION_ADD_PAYEE,
+    ACTION_REGISTER, ACTION_SET_RULE, ACTION_UNPAUSE, ACTION_WITHDRAW,
 };
 use crate::decision::{Decision, DecisionLog, Outcome, RefusalView, REFUSALS};
 use crate::node::node_of;
@@ -120,7 +120,7 @@ pub struct LeashAccount {
 /// | Method | Guard |
 /// | --- | --- |
 /// | `new` | `#[init]` without `ignore_state`, so it cannot re-run on a live account; and it refuses an `admin` equal to this account, which would make every `assert_admin` below vacuous |
-/// | `register_credential` | `assert_admin` |
+/// | `register_credential` | `assert_admin`; the first credential ever stops there (the bootstrap), every later one also needs a passkey assertion from a registered credential |
 /// | `remove_credential` | `assert_admin` |
 /// | `set_rule` | `assert_admin`, plus the passkey gate on a loosening |
 /// | `add_payee` | `assert_admin`, plus the passkey gate |
@@ -185,28 +185,37 @@ impl LeashAccount {
     // Credentials
     // ===================================================================================
 
-    /// Register a passkey that may authorise loosening changes. **ADMIN only.**
+    /// Register a passkey that may authorise loosenings.
     ///
-    /// This is the trust boundary of the entire passkey design, and the admin check is the
-    /// whole of it. The contract cannot prove a credential is hardware-backed: an assertion
-    /// carries no attestation, synced passkeys (iCloud Keychain, Google Password Manager)
-    /// attest `none`, and a software P-256 key produces a signature this contract accepts —
-    /// the sandbox tests sign with exactly such a key. So "a registered credential signed
-    /// this" means only as much as the registration did, and the only thing standing between
-    /// an attacker and a self-minted credential is who may register one.
+    /// # The trust boundary
+    ///
+    /// The contract cannot tell a secure enclave from a P-256 key made by a script, so the
+    /// passkey gate is only as strong as *who may add a credential*. Therefore:
+    ///
+    /// - **The very first registration is ADMIN-only, with no assertion.** Nothing exists to
+    ///   sign it. That bootstrap is the one unavoidable act of trust in the design: whoever holds
+    ///   the admin key at that moment decides which key the gate trusts. It is a deployment-time
+    ///   act, and "first" means *first ever*: a revoked credential still counts, so removing every
+    ///   credential does not reopen the bootstrap.
+    /// - **Every later registration needs ADMIN *and* a valid assertion from an already-registered
+    ///   credential**, under [`ACTION_REGISTER`], over the new credential's id, key and starting
+    ///   nonce. A stolen admin key therefore cannot mint itself a credential and then widen a
+    ///   rule or withdraw: it would need a signature from a passkey it does not hold.
+    ///
+    /// The flip side is deliberate: [`Self::remove_credential`] stays ungated (removal is
+    /// tightening), so if every credential is lost or revoked nobody can register another and the
+    /// funds are stuck. Register two before relying on this.
     ///
     /// Not reachable by an agent's function-call key on two counts: that key's method
     /// allow-list does not include this method, and even if it did, the call would arrive with
     /// the agent's account as predecessor, which is not the admin.
-    /// `an_agent_function_call_key_cannot_register_a_credential` pins both, using a key on the
-    /// wallet, which is where a key would be if the deployment were ever wrong.
     ///
     /// Re-registering an id is refused. Re-registration would reset the nonce, and a reset
     /// nonce re-arms every assertion ever signed under that credential. Rotation means a new
     /// credential id.
     ///
     /// The contract account pays the storage staking, which is why the count is capped.
-    pub fn register_credential(&mut self, cred: Credential) {
+    pub fn register_credential(&mut self, cred: Credential, assertion: Option<Assertion>) {
         self.assert_admin();
         require!(
             self.state.known_credential(cred.id()).is_none(),
@@ -217,7 +226,35 @@ impl LeashAccount {
             self.state.active_credential_count() < MAX_CREDENTIALS,
             "too many active credentials; remove one first"
         );
+        // Bootstrap only while no credential has EVER existed (revoked ones count).
+        if !self.state.all_credentials().is_empty() {
+            let assertion = assertion.unwrap_or_else(|| {
+                env::panic_str(
+                    "registering another credential needs a passkey assertion from a registered \
+                     credential; the admin key alone cannot add one",
+                )
+            });
+            self.consume_assertion(
+                &assertion,
+                ACTION_REGISTER,
+                &register_payload(cred.id(), cred.pubkey_sec1(), cred.nonce()),
+            );
+        }
         self.state.insert_credential(cred);
+    }
+
+    /// The 32 bytes a registered credential must sign to authorise `register_credential(cred)`,
+    /// base64. `credential_id` is the *signer*, an already-registered credential.
+    pub fn challenge_for_register(
+        &self,
+        cred: Credential,
+        credential_id: Base64VecU8,
+    ) -> Base64VecU8 {
+        self.challenge(
+            ACTION_REGISTER,
+            &register_payload(cred.id(), cred.pubkey_sec1(), cred.nonce()),
+            credential_id.as_ref(),
+        )
     }
 
     /// Revoke a registered passkey. **ADMIN only, never gated** — removing a credential only

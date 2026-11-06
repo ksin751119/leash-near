@@ -17,6 +17,7 @@ const mode = a[2], method = a[4], args = JSON.parse(a[a.indexOf("json-args") + 1
 const canon = (r) => ({ ...r, payees: [...r.payees].sort() });
 const challengeOf = (node, rule, cred) => Buffer.from(JSON.stringify({ node, rule: canon(rule), cred, nonce: world.nonce })).toString("base64");
 const n = BigInt;
+const regChallenge = (cred, signer) => Buffer.from(JSON.stringify({ register: cred, signer, nonce: world.nonce })).toString("base64");
 const loosens = (c, p) =>
   p.token !== c.token || n(p.per_tx_limit) > n(c.per_tx_limit) || n(p.period_limit) > n(c.period_limit) ||
   p.period_ms < c.period_ms || p.window_start_ms < c.window_start_ms || p.window_end_ms > c.window_end_ms ||
@@ -27,9 +28,22 @@ if (mode === "as-read-only") {
     credential_ids: () => world.ids,
     node_record: () => world.rec,
     challenge_for: () => challengeOf(args.node, args.rule, args.credential_id),
+    challenge_for_register: () => regChallenge(args.cred, args.credential_id),
   }[method];
   if (!out) { console.error(`fake near: no view ${method}`); process.exit(1); }
   console.log(exactJson(out()));
+} else if (mode === "as-transaction" && method === "register_credential") {
+  if (world.ids.length > 0) {
+    if (!args.assertion) { console.error("Smart contract panicked: registering another credential needs a passkey assertion from a registered credential; the admin key alone cannot add one"); process.exit(1); }
+    const signed = JSON.parse(args.assertion.client_data_json).challenge.replace(/-/g, "+").replace(/_/g, "/");
+    const want = regChallenge(args.cred, args.assertion.credential_id).replace(/=+$/, "");
+    if (!world.ids.includes(args.assertion.credential_id) || signed !== want) { console.error("Smart contract panicked: assertion rejected"); process.exit(1); }
+    world.nonce += 1;
+  }
+  world.ids.push(args.cred.id);
+  world.calls.push({ register: args.cred.id, assertion: Boolean(args.assertion) });
+  save();
+  console.log("null");
 } else if (mode === "as-transaction" && method === "set_rule") {
   const gated = world.rec === null || loosens(world.rec.rule, args.rule);
   if (gated) {

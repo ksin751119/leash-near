@@ -8,8 +8,8 @@ reasoning behind each decision.
 ## The accounts
 
 ```
-admin        a human's full-access key. Writes rules, registers credentials, creates agent accounts.
-             Cannot move money and cannot widen a rule alone.
+admin        a human's full-access key. Writes rules, creates agent accounts, registers the FIRST credential.
+             Cannot move money, cannot widen a rule, and cannot register a second credential alone.
 wallet       holds the token and runs the contract. After freeze.sh it has NO keys of any kind:
              nobody can sign as it and its code can never change.
 budget node  a name and a parent. Carries the rule. Has no role at runtime except its id.
@@ -69,8 +69,8 @@ An assertion is the WebAuthn `get` response. The contract recomputes the expecte
 `SHA-256(action ‖ payload ‖ nonce ‖ this contract's account id)`, each part length-prefixed, and
 checks the credential's P-256 signature over `authenticator_data ‖ SHA-256(client_data_json)`, that
 the challenge in the client data is the expected one, that the type is `webauthn.get`, and that the
-authenticator set the user-verified bit. The nonce advances on use. Four actions have four tags
-(`set_rule`, `add_payee`, `unpause`, `withdraw`), so an assertion for one cannot be redirected to
+authenticator set the user-verified bit. The nonce advances on use. Five actions have five tags
+(`set_rule`, `add_payee`, `unpause`, `withdraw`, `register_credential`), so an assertion for one cannot be redirected to
 another.
 
 An accepted widening is the only thing that resets a node's spend ledger (it bumps the epoch and
@@ -80,7 +80,11 @@ be a free, ungated budget refill. This is why a demo reset after a take needs a 
 What this proves is narrow. It proves the holder of a registered credential signed this exact
 challenge and that the authenticator asserted user verification. It cannot prove the credential is
 hardware-backed (there is no attestation, and synced passkeys attest `none`), so the guarantee is
-only as strong as registration, which is admin-only. See the README for the full wording.
+only as strong as registration. The first credential is registered by the admin alone (the
+bootstrap, the one unavoidable act of trust); every later one needs the admin and an assertion from a
+registered credential, under its own action tag over the new key. Otherwise a stolen admin key could
+mint its own credential and sign a widening with it. Removal is ungated, so losing every credential
+strands the funds. See the README for the full wording.
 
 P-256 is not a NEAR host function, so the curve arithmetic runs in the wasm: 33.8 TGas of the 300
 a transaction gets.
@@ -121,6 +125,7 @@ served stale (and marked stale) while an endpoint is limited rather than retried
 | `deploy.sh` | Deploy and `new`. Refuses admin equal to wallet. |
 | `grant-agent-key.sh` | Put the spend-only key on an agent account, read it back, delete full-access keys. |
 | `freeze.sh` | Delete the wallet's full-access key. Irreversible. |
+| `register-credential.sh` | Register a credential: the first by the admin alone, later ones with a signature from an existing one. |
 | `reset-demo.sh` | Bring the budget node to the scripted rule with nothing spent; one face scan per widening. |
 | `preflight.sh` | Read-only readiness check, ends in READY or NOT ready. |
 | `demo-beats.json`, `demo-rule.sh` | The scripted demo as data, shared by reset and preflight. |
