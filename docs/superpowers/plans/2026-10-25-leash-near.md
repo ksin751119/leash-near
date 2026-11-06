@@ -4,7 +4,7 @@
 
 **Goal:** A NEAR account that holds money, hands agents a key that can only call `spend`, and refuses payments that break a rule the agents cannot reach — with widening of that rule gated by an on-chain WebAuthn (passkey) signature.
 
-**Architecture:** One contract (`leash-account`) deployed to `wallet.leash.testnet`, whose full-access keys are deleted after deployment so its code is frozen. Agents are subaccounts of a budget-name account; the budget node is derived from the caller's parent account, so membership needs no registry. Rules live in contract state, writable only by ADMIN, and any field that loosens requires a passkey assertion verified in-contract. Payments reserve headroom before dispatching `ft_transfer` and settle in the callback.
+**Architecture:** One contract (`leash-account`) deployed to `wallet.leash.testnet`, whose keys are all deleted after deployment, so its code is frozen and nobody can sign as it. Agents are subaccounts of a budget-name account; the budget node is derived from the caller's parent account, so membership needs no registry. Rules live in contract state, writable only by ADMIN, and any field that loosens requires a passkey assertion verified in-contract. Payments reserve headroom before dispatching `ft_transfer` and settle in the callback.
 
 **Tech Stack:** Rust, `near-sdk` 5.x, `near-workspaces` for sandbox tests, `p256` + `sha2` (no_std, wasm32) for WebAuthn verification, NEP-141 (USDC on testnet), NEP-297 events, a static HTML/JS demo page reusing the previous project's visual design, Node agent processes reusing the previous project's loop shape.
 
@@ -70,7 +70,7 @@ Expected: FAIL — contract does not build / helper missing.
 
 - [ ] **Step 3: Implement the contract skeleton and the freeze script**
 
-`LeashAccount` holds `admin: AccountId`, `token: AccountId`, `paused: bool` and nothing else yet. `scripts/freeze.sh` deletes every full-access key on the wallet account via `near account delete-key` after deploy. The contract exposes **no** method that calls `Promise::deploy_contract` or `add_key` — that absence is what the test pins.
+`LeashAccount` holds `admin: AccountId`, `token: AccountId`, `paused: bool` and nothing else yet. `scripts/freeze.sh` deletes every key on the wallet account via `near account delete-keys <wallet> public-keys <key>` after deploy (the command is `delete-keys`; `delete-key` does not exist in near-cli 0.31). The contract exposes **no** method that calls `Promise::deploy_contract` or `add_key` — that absence is what the test pins.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
@@ -419,7 +419,7 @@ Expected: FAIL
 
 - [ ] **Step 3: Implement `withdraw`; write the key-granting script**
 
-`grant-agent-key.sh` adds a function-call key restricted to `receiver_id = wallet.leash.testnet`, `method_names = ["spend"]`, with a small gas allowance.
+`grant-agent-key.sh <wallet> <agent-account> <agent-pubkey> <network>` adds a function-call key **to the agent's own account** (never to the wallet), restricted to `receiver_id = wallet.leash.testnet`, `method_names = ["spend"]`, with a small gas allowance, and then deletes the agent account's full-access keys so that key is its only one. The key must be on the agent account because `spend` derives the budget node from `predecessor_id`: a key on the wallet signs as the wallet, and every payment is refused with code 1 ("no rule for this agent's node"; seen on testnet). The wallet therefore ends with **no keys at all**, and freezing it does not depend on granting. An agent attaches **at least ~40 TGas, 60 to be safe** to `spend` (it reserves 35 TGas for its two promises up front; 30 fails with "Exceeded the prepaid gas").
 
 - [ ] **Step 4: Run to verify they pass**
 
@@ -442,6 +442,7 @@ git add -A && git commit -m "feat: passkey-gated withdraw, and agent keys that c
 
 **Interfaces:**
 - Consumes: the contract's `spend` and view methods (Tasks 5–6).
+- Each process signs as `AGENT_ACCOUNT` (e.g. `pay.ops.…`) with the function-call key on that account, receiver the wallet, and attaches 60 TGas and no deposit to `spend`. It never holds, and the wallet never has, a key that signs as the wallet.
 - Produces: two processes started with `AGENT_NAME`, `AGENT_ACCOUNT`, `PORT`; each serves `GET /state` with `{ name, agentAddr, lastAction, cohort, refusals }` and accepts `POST /instruct {text}`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -489,7 +490,7 @@ git add -A && git commit -m "feat: two agent processes sharing one budget"
 ```js
 test("renders a refusal with its reason name and no amount moved", …)
 test("the budget bar segments by agent and sums to spent_in_period", …)
-test("renders zero full-access keys as the headline fact", …)   // from RPC view_access_key_list, not a contract view
+test("renders the wallet's empty key list as the headline fact", …)   // zero keys of any kind, from RPC view_access_key_list on the wallet, not a contract view; the agents' single spend-only keys are read from each agent account
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
@@ -526,7 +527,7 @@ git add -A && git commit -m "feat: demo page reading contract state directly"
 
 - [ ] **Step 1: Write `preflight.sh`**
 
-Checks, each failing loudly (no silent `|| 0`): wallet has zero full-access keys; both agent keys exist and are `spend`-only; rule present with headroom for exactly the scripted beats; both agent processes answer `/state`; the token balance is what the script expects; **at least two credentials are registered** (the spec's mitigation for a lost passkey).
+Checks, each failing loudly (no silent `|| 0`): the wallet has **no keys at all** (`view_access_key_list` is empty); each agent account holds exactly one key, function-call, receiver the wallet, `["spend"]` only; rule present with headroom for exactly the scripted beats; both agent processes answer `/state`; the token balance is what the script expects; **at least two credentials are registered** (the spec's mitigation for a lost passkey).
 
 - [ ] **Step 2: Run it against a fresh testnet deploy**
 

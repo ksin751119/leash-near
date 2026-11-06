@@ -54,18 +54,32 @@ leash.testnet                  ADMIN. Full-access key, held by a human.
 │                              Owns the namespace. Writes rules. Creates agent accounts.
 │
 ├── wallet.leash.testnet       THE MONEY. Holds NEP-141 USDC. Runs leash-account.wasm.
-│                              ZERO full-access keys. Code is frozen. Only the two
-│                              function-call keys below can touch it.
+│                              ZERO KEYS OF ANY KIND after freezing. Code is frozen, and
+│                              nobody can sign as this account.
 │
 └── ops.leash.testnet          A BUDGET. An account that exists to be a name and a parent.
     │
-    ├── pay.ops.leash.testnet   AGENT 1 (payments process)
-    └── subs.ops.leash.testnet  AGENT 2 (subscriptions process)
+    ├── pay.ops.leash.testnet   AGENT 1 (payments process). Holds ONE key: function-call,
+    │                           receiver wallet.leash.testnet, methods ["spend"].
+    └── subs.ops.leash.testnet  AGENT 2 (subscriptions process). Same, its own key.
 ```
 
-Each agent process holds **one function-call access key on `wallet.leash.testnet`**, pinned to
-`method_names = ["spend"]`. The protocol — not our code — makes it impossible for that key to
-call `usdc.testnet` at all.
+Each agent holds **one function-call access key on its own account**, with
+`receiver_id = wallet.leash.testnet` and `method_names = ["spend"]`, and no other key. The
+protocol — not our code — makes it impossible for that key to call `usdc.testnet` at all.
+
+**Why the key is on the agent's account and not on the wallet.** `spend` identifies the caller
+by `predecessor_id` and derives the budget node from it. A key on the wallet signs *as the
+wallet*, so the contract would see the wallet as the caller, derive no node, and refuse every
+payment with code 1; this was found, not assumed, on testnet. Signing as `pay.ops.…` with a key
+whose receiver is the wallet is what makes the caller the agent while the protocol still pins
+the key to `spend` on the wallet. The wallet account itself therefore needs no key after
+deployment, and has none: freezing it leaves an account whose keys list is empty. Granting an
+agent's key and freezing the wallet are independent steps, in either order.
+
+Spending needs gas: `spend` reserves 20 + 15 TGas for `ft_transfer` and its callback before it
+starts, so an agent attaches at least ~40 TGas (60 is safe; 30 fails with "Exceeded the
+prepaid gas"). Allowed payments burn about 8.5 TGas of that.
 
 Two further facts that shape the API:
 
@@ -79,8 +93,7 @@ Two further facts that shape the API:
 ### What ADMIN cannot do
 
 ADMIN can repoint rules and mint agent accounts. ADMIN **cannot move the money**: it holds no
-key on `wallet.leash.testnet`, and the wallet account has no full-access key for anyone to
-steal. ADMIN also cannot widen a rule alone — widening needs the passkey.
+key on `wallet.leash.testnet`, and the wallet account has no key at all for anyone to steal. ADMIN also cannot widen a rule alone — widening needs the passkey.
 
 ### The honest boundary
 
@@ -313,30 +326,35 @@ So the guarantee is only as strong as the **registration step**: whoever registe
 credential vouches that it is a real authenticator. That makes admin-only credential
 registration a security requirement, not a convenience.
 
-### `#[private]` is not an authorisation check in this design
+### `#[private]` is not relied on alone
 
-near-sdk's `#[private]` checks that the predecessor is the contract's own account. **The
-agent's function-call keys live on that same account**, so a key there arrives with exactly
-that predecessor and passes. Any state-writing method whose only guard is `#[private]` is
-therefore reachable by an agent key, with no admin check and no assertion, stopped only by the
-`method_names` list on the key — a defence that lives in a deploy script rather than in the
-contract.
+near-sdk's `#[private]` checks that the predecessor is the contract's own account. In the
+intended deployment that is sufficient: the agents' keys are on their own accounts and the
+frozen wallet has no key, so nobody can sign as the wallet and only the contract's own
+promises arrive with that predecessor. (An earlier version of this spec said the agents' keys
+lived on the wallet and concluded `#[private]` was nearly useless. That premise was wrong, and
+a key on the wallet could not have worked at all: see "Accounts and keys".)
 
-So: a state-writing method that is not a promise target must not be an exported contract
-method at all (keep it out of the `#[near]` impl), and the one that must be exported —
-`on_payees_registered` — pairs `#[private]` with a check that the promise results it was told
-to expect are actually present. A direct call has none, and a function-call access key cannot
-build a promise chain. `commit_rule_is_not_an_exported_method` and
-`on_payees_registered_cannot_be_driven_by_an_agent_key` pin both halves, and the `#[near]`
-impl carries a table of every `&mut self` method and what guards it.
+The checks below stay anyway, as depth, because `#[private]` is only as good as the claim that
+no key exists on the wallet, and that is a property of how the account was deployed, not of
+the code. Before the freeze the deployer's full-access key signs as the wallet, and a key added
+there by mistake would pass `#[private]` with no admin check and no assertion. So: a
+state-writing method that is not a promise target is not an exported contract method at all
+(keep it out of the `#[near]` impl), and the ones that must be exported — `on_payees_registered`
+and `on_transfer` — pair `#[private]` with a check that the promise results they were told to
+expect are present. A direct call has none, and a function-call access key cannot build a
+promise chain. `commit_rule_is_not_an_exported_method` and
+`on_payees_registered_cannot_be_driven_by_an_agent_key` pin both halves (the latter builds a
+key on the wallet, which a correct deployment never has), and the `#[near]` impl carries a
+table of every `&mut self` method and what guards it.
 
 ### The admin must be a different account from the wallet
 
-Same root cause, stated as the premise it is. Every gated method is guarded by `assert_admin`,
-which compares the predecessor against the stored admin — and the agent's keys live on the
-wallet account. **An admin equal to the wallet would make every one of those checks succeed for
-an agent key**, taking the passkey gate with it: an agent could set its own rules. The whole
-guard story depends on the two being different accounts.
+Every gated method is guarded by `assert_admin`, which compares the predecessor against the
+stored admin. An admin equal to the wallet would be satisfied by anything that signs as the
+wallet (the deployer's key before the freeze, or a key added by mistake), taking the passkey
+gate with it, and after the freeze by nobody at all. It is depth rather than the main defence,
+since a correct deployment has no such signer.
 
 `new` refuses it, so no deployment can be in that state, and `scripts/deploy.sh` refuses it
 before building anything so the failure does not arrive as a half-finished deploy.
@@ -387,8 +405,9 @@ demo does not depend on one.
 - **Sandbox (`near-workspaces`):** the full payment path; each refusal code; a refusal
   produces a successful transaction with a recorded decision and no balance change;
   **two agents spending concurrently against one node**; `ft_transfer` failure releases the
-  reservation; a function-call key cannot call anything but `spend`; after key removal the
-  wallet account has zero full-access keys and `deploy_contract` on it fails.
+  reservation; a function-call key cannot call anything but `spend`, and is held on the agent's own
+  account; after key removal the wallet account has no keys at all and `deploy_contract` on it
+  fails.
 - **The claim tests.** Each sentence the README makes as a security claim has a test named
   after it. If a claim has no test, it comes out of the README.
 
@@ -399,8 +418,11 @@ demo does not depend on one.
 Five beats, recorded in segments (no one-take constraint this time; no 4-minute cap either,
 but keep it under five minutes).
 
-0. **Evidence first.** `near account list-keys wallet.leash.testnet` → two function-call keys,
-   zero full-access keys. "Nobody has full control of this account. Including me."
+0. **Evidence first.** `near account list-keys wallet.leash.testnet` → an empty table. "The
+   account that holds the money has no keys. Nobody can sign as it, including me. The only way
+   out for the money is `spend`, and `spend` is called from the agents' own accounts and
+   decided by the contract." Then `near account list-keys pay.ops.leash.testnet` → one key,
+   function-call, `spend` on the wallet and nothing else.
 1. **A payment that passes.** Agent 1 pays a known vendor; transaction link.
 2. **A payment the chain refuses.** Agent 1 is instructed to pay an unknown payee. The
    transaction succeeds, no money moves, the reason appears on screen and in the ledger.

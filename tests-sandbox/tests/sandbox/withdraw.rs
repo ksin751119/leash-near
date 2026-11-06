@@ -334,7 +334,8 @@ async fn no_other_assertion_can_withdraw() -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------------------
 
 /// `#[private]` is satisfied by any key on the wallet account, so the callback's own check
-/// that a promise result is present is all that stands here. Called from a key ON the wallet.
+/// that a promise result is present is all that stands here. A correct deployment has no such
+/// key; the test adds one to prove the check does not depend on that.
 #[tokio::test]
 async fn on_withdrawn_cannot_be_driven_by_a_key_on_the_wallet() -> anyhow::Result<()> {
     use near_workspaces::types::{AccessKey, SecretKey};

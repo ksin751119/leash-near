@@ -586,12 +586,11 @@ async fn a_configured_node_is_never_a_stranger() -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------------------
 
 /// `on_transfer` is a promise target, so it must stay exported — and `#[private]` alone does
-/// not protect it. `#[private]` checks that the predecessor is this account, and the agent's
-/// function-call keys live **on this account**, so an agent key arrives with exactly that
-/// predecessor and satisfies it.
+/// not rely on it alone. `#[private]` checks only that the predecessor is this account: true of
+/// this contract's own promises, and of any key that is ever added to the wallet.
 ///
-/// This test therefore calls `on_transfer` from a key **on the wallet account**, which is the
-/// only form of the test that proves anything: a call from another account would be refused by
+/// This test therefore calls `on_transfer` from a key **on the wallet account** (which a correct
+/// deployment never has; the test builds one), the only form of the test that proves anything: a call from another account would be refused by
 /// `#[private]` regardless, and would say nothing about the pairing that actually defends this
 /// method — that the promise result it expects must really be there.
 ///

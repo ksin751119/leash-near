@@ -98,14 +98,24 @@ pub struct LeashAccount {
 ///
 /// # Audit: what guards each state-writing method
 ///
-/// `#[private]` is weaker here than it looks. It checks that the predecessor is this account,
-/// and in this design the agent's function-call keys live **on this account** — so a key here
-/// arrives with exactly that predecessor and passes. A `&mut self` method whose only guard is
-/// `#[private]` is therefore reachable by an agent key, with no admin check and no assertion.
-/// Review found `commit_rule` in exactly that state; it is now outside this block, so the
-/// exported method does not exist.
+/// Where the keys are, because every guard below is judged against it. The agents' function-call
+/// keys are **not on this account**: each lives on the agent's own account (`pay.ops.x`), with
+/// this account as its `receiver_id` and `["spend"]` as its only method, because `spend`
+/// derives the budget node from `predecessor_id` and so the signer must be the agent. And once
+/// the wallet is frozen it holds no key at all, so nobody can sign as this account: the only
+/// way a call arrives with `predecessor_id == current_account_id` is this contract's own
+/// promises. Today, `#[private]` therefore means what it says.
 ///
-/// Every `&mut self` method in this block, and what actually stops an agent key:
+/// The extra checks below are still there, deliberately, as depth rather than as the defence.
+/// `#[private]` is only as good as the claim that no key exists on this account, and that claim
+/// is a property of how the account is deployed, not of this code: before the freeze the
+/// deployer's full-access key signs as this account, and a key added here by mistake would pass
+/// `#[private]`, with no admin check and no assertion. So no state-writing method relies on
+/// `#[private]` alone. `commit_rule` is not exported at all, the two state-writing callbacks
+/// also require the promise results they were dispatched with, and `new` refuses an admin
+/// equal to this account.
+///
+/// Every `&mut self` method in this block, and what actually stops a caller:
 ///
 /// | Method | Guard |
 /// | --- | --- |
@@ -131,26 +141,25 @@ pub struct LeashAccount {
 impl LeashAccount {
     /// Initialise the wallet.
     ///
-    /// **`admin` must be an account whose keys are not on this one, and that is a security
-    /// requirement rather than a convention.** Every gated method in this contract is guarded
-    /// by `assert_admin`, which compares `env::predecessor_account_id()` against the stored
-    /// admin. The agent's function-call keys live **on this account**, so calls made with one
-    /// arrive with the predecessor set to this account — and if the admin were this account,
-    /// every one of those comparisons would succeed for an agent key. `assert_admin` would
-    /// stop protecting anything, and the passkey gate with it: an agent could set its own
-    /// rules.
+    /// **`admin` must be a different account from this one.** Every gated method is guarded by
+    /// `assert_admin`, which compares `env::predecessor_account_id()` against the stored admin.
+    /// With the admin equal to this account, every one of those comparisons would be satisfied
+    /// by anything that signs as this account: the deployer's full-access key before the
+    /// freeze, or a key someone adds here. The passkey gate sits behind `assert_admin`, so it
+    /// would go with it. After the freeze nobody can sign as this account at all, so such a
+    /// deployment would instead have an admin nobody can ever act as.
     ///
-    /// That is the same mistake as relying on `#[private]` here (see the audit table on this
-    /// impl block), and it is the last place the premise could have been broken, so it is
-    /// refused at the door rather than left to a deploy script. `scripts/deploy.sh` refuses it
-    /// too, so the failure arrives before anything is deployed.
+    /// In the intended deployment neither happens (the agents' keys are on their own accounts,
+    /// and the frozen wallet has none), so this is depth, not the primary defence; but it costs
+    /// nothing, and it is refused at the door rather than left to a deploy script.
+    /// `scripts/deploy.sh` refuses it too, so the failure arrives before anything is deployed.
     #[init]
     pub fn new(admin: AccountId, token: AccountId) -> Self {
         require!(
             admin != env::current_account_id(),
-            "admin must be a different account from the wallet: the agent's function-call keys \
-             live on the wallet account, so an admin equal to it would let an agent key satisfy \
-             every admin check"
+            "admin must be a different account from the wallet: an admin equal to it would be \
+             satisfied by anything that signs as the wallet, so every admin check would stop \
+             protecting anything"
         );
         Self {
             admin,
@@ -187,9 +196,10 @@ impl LeashAccount {
     /// an attacker and a self-minted credential is who may register one.
     ///
     /// Not reachable by an agent's function-call key on two counts: that key's method
-    /// allow-list does not include this method, and even if it did, calls made with a key on
-    /// the wallet account arrive with `predecessor_id == <the wallet>`, which is not the
-    /// admin. `an_agent_function_call_key_cannot_register_a_credential` pins both.
+    /// allow-list does not include this method, and even if it did, the call would arrive with
+    /// the agent's account as predecessor, which is not the admin.
+    /// `an_agent_function_call_key_cannot_register_a_credential` pins both, using a key on the
+    /// wallet, which is where a key would be if the deployment were ever wrong.
     ///
     /// Re-registering an id is refused. Re-registration would reset the nonce, and a reset
     /// nonce re-arms every assertion ever signed under that credential. Rotation means a new
@@ -439,12 +449,12 @@ impl LeashAccount {
     /// # Why `#[private]` is not enough here
     ///
     /// This is the one method in the contract that must stay exported, because it is a promise
-    /// target. It is also the one place where `#[private]` is load-bearing — and in *this*
-    /// design `#[private]` means less than it looks like it means. It checks that the
-    /// predecessor is this account, and the agent's function-call keys live **on this
-    /// account**, so an agent key arrives with exactly that predecessor. On its own,
-    /// `#[private]` would let any key on the wallet account call this with an arbitrary rule
-    /// and `reset_ledger: true` — an unsigned rule change and a budget wipe.
+    /// target, so `#[private]` is what keeps outsiders away from it. In the intended
+    /// deployment that is sufficient: the agents' keys are on their own accounts and the frozen
+    /// wallet has none, so only this contract's own promise can arrive from this account. But
+    /// `#[private]` only checks the predecessor, so a key on the wallet (added before the
+    /// freeze, by mistake) would pass it and could call this with an arbitrary rule and
+    /// `reset_ledger: true` — an unsigned rule change and a budget wipe.
     ///
     /// So it is paired with a check that this really is a callback: `deposits` is how many
     /// `storage_deposit` promises `commit_rule` dispatched, and the promise results actually
@@ -716,19 +726,19 @@ impl LeashAccount {
     ///
     /// # Why `#[private]` is not enough here
     ///
-    /// The same reason as `on_payees_registered`, and it is worth saying twice. `#[private]`
-    /// checks that the predecessor is this account, and the agent's function-call keys live
-    /// **on this account** — so an agent key arrives with exactly that predecessor and sails
-    /// through. On its own, `#[private]` would let any key on the wallet account call this
-    /// with any `node`, `amount`, `record_id` and `reserved` it liked: free headroom on a
-    /// node, and a rewritten decision log.
+    /// The same reason as `on_payees_registered`. `#[private]` checks only that the predecessor
+    /// is this account; that holds for nobody but this contract's own promises while the wallet
+    /// has no keys, and for any key that ever gets added to it. On its own, `#[private]` would
+    /// then let that key call this with any `node`, `amount`, `record_id` and `reserved` it
+    /// liked: free headroom on a node, and a rewritten decision log.
     ///
     /// So it is paired with a check that this really is a callback. `ft_transfer` is dispatched
     /// as exactly one promise, so exactly one promise result must be present; a direct
     /// function call has none, and a function-call access key cannot build a promise chain.
     /// `on_transfer_cannot_be_driven_by_an_agent_key` calls it from a key on the wallet
-    /// account — the strongest form of the test, because `#[private]` is satisfied for that
-    /// caller and the callback check is the only thing left to refuse it.
+    /// account. No such key exists in a correct deployment; the test builds one because it is
+    /// the only caller `#[private]` lets through, so the callback check is the only thing left
+    /// to refuse it.
     #[private]
     pub fn on_transfer(
         &mut self,
@@ -830,7 +840,8 @@ impl LeashAccount {
     ///
     /// `#[private]` is satisfied by any key on this account, so it is paired with a check that
     /// a promise result is present, as the other callbacks are. A direct call has none.
-    /// `on_withdrawn_cannot_be_driven_by_a_key_on_the_wallet` calls it from a key on the wallet.
+    /// `on_withdrawn_cannot_be_driven_by_a_key_on_the_wallet` calls it from a key on the wallet
+    /// (one a correct deployment never has; see the audit note on this impl block).
     #[private]
     pub fn on_withdrawn(&self, to: AccountId, amount: U128) -> bool {
         require!(
@@ -1017,21 +1028,21 @@ impl LeashAccount {
 }
 
 /// Internal helpers. Outside the `#[near]` block, so none of these is an exported contract
-/// method — which for anything that writes state is the only reliable protection in this
-/// design. See `commit_rule` and `on_payees_registered` for why `#[private]` is not.
+/// method — which for anything that writes state is the strongest protection there is. See
+/// `commit_rule` and `on_payees_registered` for why `#[private]` is not relied on alone.
 impl LeashAccount {
     /// Commit a rule for `node`, registering any payee it introduces on the token first.
     /// Returns whether the rule was applied.
     ///
-    /// **Not in the `#[near]` impl, deliberately.** It used to be, guarded by `#[private]`,
-    /// which was a hole: `#[private]` only checks that the predecessor is this account, and in
-    /// this design the agent's function-call keys live on this account. So
-    /// `commit_rule(node, any_rule, reset_ledger: true)` was an exported method reachable by
-    /// an agent key with no `assert_admin` and no assertion — an arbitrary rule and a budget
-    /// wipe. The only thing stopping it was the `method_names = ["spend"]` restriction on the
-    /// key, which is a real defence but lived in a deploy script, one typo away from gone.
-    /// It is never a promise target, so the fix is for the exported method not to exist at
-    /// all. `commit_rule_is_not_an_exported_method` pins that.
+    /// **Not in the `#[near]` impl, deliberately.** It used to be, guarded by `#[private]`
+    /// alone, which only checks that the predecessor is this account. In the intended
+    /// deployment that keeps everyone out (the agents' keys are on their own accounts, and the
+    /// frozen wallet has none), but it is a claim about how the account is deployed, not about
+    /// this code: a key on the wallet would have reached
+    /// `commit_rule(node, any_rule, reset_ledger: true)` with no `assert_admin` and no
+    /// assertion — an arbitrary rule and a budget wipe. It is never a promise target, so the
+    /// exported method does not need to exist at all, and the safety no longer depends on the
+    /// deployment. `commit_rule_is_not_an_exported_method` pins that.
     ///
     /// Why a callback at all: NEP-141 `ft_transfer` fails for a receiver with no storage
     /// deposit on the token, so a payee that is on the allow-list but not registered would

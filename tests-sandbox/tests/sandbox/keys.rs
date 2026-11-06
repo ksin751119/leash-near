@@ -6,13 +6,20 @@
 //!
 //! Every refusal below comes from the NEAR runtime before any contract code runs, which is
 //! the point: an agent key's narrowness does not depend on a line of this contract being right.
-//! The key is built exactly as `scripts/grant-agent-key.sh` builds it: `receiver_id` = the
-//! wallet, `method_names` = `["spend"]`, a small allowance. (The sandbox tests cannot run the
-//! near-cli script itself; they mirror its parameters.)
+//! The key is built exactly as `scripts/grant-agent-key.sh` builds it, and it sits where the
+//! script puts it: on the AGENT's own account (`pay.ops.…`), not on the wallet. `spend` derives
+//! the budget node from `predecessor_id`, so the signer has to be the agent; a key on the wallet
+//! would sign as the wallet and be refused with code 1 for having no node (seen on testnet).
+//! The key has `receiver_id` = the wallet, `method_names` = `["spend"]`, a small allowance, and
+//! is the only key the agent account holds. (The sandbox tests cannot run the near-cli script
+//! itself; they mirror its parameters.) The wallet is frozen and holds no key at all.
 
 mod common;
 
-use common::{deploy_with_token, full_access_key_count, Fixture};
+use common::{
+    agents, deploy_with_token, full_access_key_count, register_passkey, rule,
+    set_rule_signed, Fixture, Passkey,
+};
 use near_workspaces::result::ExecutionFinalResult;
 use near_workspaces::types::{AccessKey, AccessKeyPermission, Gas, KeyType, NearToken, SecretKey};
 use near_workspaces::Account;
@@ -21,12 +28,25 @@ use serde_json::json;
 /// The allowance the grant script uses by default.
 const ALLOWANCE: NearToken = NearToken::from_millinear(250);
 
-/// Freeze a fresh deployment with one agent key on the wallet, restricted like the script's.
+const PAYEE: &str = "alice.testnet";
+
+/// A deployment as the scripts leave it: the node `ops` has a rule, the wallet is frozen (no key
+/// of any kind), and `pay.ops` holds one function-call key restricted like the script's and no
+/// full-access key. Returns that agent signing with the restricted key.
 async fn frozen_with_key() -> anyhow::Result<(Fixture, Account)> {
     let fx = deploy_with_token().await?;
+    let pk = Passkey::new("admin phone");
+    register_passkey(&fx, &pk).await?;
+    let ag = agents(&fx).await?;
+    let token = fx.token.id().to_string();
+    set_rule_signed(&fx, &pk, &ag.node, &rule(&token, 1_000, 10_000, 86_400_000, 0, u64::MAX, &[PAYEE], false))
+        .await?;
+
+    // grant-agent-key.sh: the restricted key on the agent account, then the agent's full-access
+    // keys deleted.
     let sk = SecretKey::from_random(KeyType::ED25519);
-    fx.wallet
-        .batch()
+    ag.pay
+        .batch(ag.pay.id())
         .add_key(
             sk.public_key(),
             AccessKey::function_call_access(fx.wallet.id(), &["spend"], Some(ALLOWANCE)),
@@ -36,14 +56,19 @@ async fn frozen_with_key() -> anyhow::Result<(Fixture, Account)> {
         .into_result()?;
     for k in fx
         .worker
-        .view_access_keys(fx.wallet.id())
+        .view_access_keys(ag.pay.id())
         .await?
         .iter()
         .filter(|k| matches!(k.access_key.permission, AccessKeyPermission::FullAccess))
     {
+        ag.pay.batch(ag.pay.id()).delete_key(k.public_key.clone()).transact().await?.into_result()?;
+    }
+
+    // freeze.sh: no key left on the wallet.
+    for k in fx.worker.view_access_keys(fx.wallet.id()).await? {
         fx.wallet.batch().delete_key(k.public_key.clone()).transact().await?.into_result()?;
     }
-    let agent = Account::from_secret_key(fx.wallet.id().clone(), sk, &fx.worker);
+    let agent = Account::from_secret_key(ag.pay.id().clone(), sk, &fx.worker);
     Ok((fx, agent))
 }
 
@@ -51,7 +76,10 @@ async fn frozen_with_key() -> anyhow::Result<(Fixture, Account)> {
 /// allowance, so a `max_gas` call is refused with `NotEnoughAllowance` before the key's
 /// method or receiver restriction is ever looked at — which would make every negative test in
 /// this file pass for the wrong reason. The specific error is asserted below as well.
-const GAS: Gas = Gas::from_tgas(30);
+///
+/// 60 TGas, because an allowed `spend` reserves 20 + 15 TGas for its two promises before it
+/// starts, so 30 fails with "Exceeded the prepaid gas". Well under what the allowance covers.
+const GAS: Gas = Gas::from_tgas(60);
 
 /// How a call refused at the protocol layer shows up. Depending on the check, the node
 /// rejects the transaction outright (an `Err`) or it fails as a receipt; either counts, and
@@ -180,31 +208,59 @@ async fn an_agent_key_cannot_add_keys_deploy_delete_or_transfer() -> anyhow::Res
     Ok(())
 }
 
-/// The control for everything above: the same key, same gas, reaches `spend`. Without it the
-/// refusals could just mean the key is dead. A caller with no rule is answered, not rejected.
+/// The control for everything above: the same key, same gas, reaches `spend`, and the policy is
+/// really evaluated for this agent. Without it the refusals could just mean the key is dead.
+///
+/// The answer has to be `allowed`, and the payee must have been paid. The earlier version of
+/// this test put the key on the wallet and asserted a refusal with code 1 (no rule for the
+/// caller): that was the wrong-key-placement bug written down as the expected result.
 #[tokio::test]
 async fn the_same_key_can_call_spend() -> anyhow::Result<()> {
     let (fx, agent) = frozen_with_key().await?;
     let res = agent
         .call(fx.wallet.id(), "spend")
-        .args_json(json!({ "token": fx.token.id(), "payee": fx.admin.id(), "amount": "1" }))
+        .args_json(json!({ "token": fx.token.id(), "payee": PAYEE, "amount": "750" }))
         .gas(GAS)
         .transact()
         .await?;
     assert!(res.is_success(), "the agent key could not call spend: {res:#?}");
-    // Proof that `spend` actually RAN, not merely that the transaction landed: the contract's
-    // own answer, a refusal with code 1 (no rule for this caller).
     let v: serde_json::Value = res.json()?;
-    assert_eq!(v["status"], "refused", "unexpected spend answer: {v}");
-    assert_eq!(v["code"], 1, "unexpected spend answer: {v}");
+    assert_eq!(v, json!({ "status": "allowed" }), "unexpected spend answer: {v}");
+    let bal: String = fx
+        .token
+        .view("ft_balance_of")
+        .args_json(json!({ "account_id": PAYEE }))
+        .await?
+        .json()?;
+    assert_eq!(bal, "750", "the payee was not paid");
     Ok(())
 }
 
-/// The key on chain is exactly what was asked for: this is the RPC read the later tasks do.
+/// The same key, one rule broken: the chain refuses for a policy reason (the allow-list, code 4),
+/// not because the caller has no node. Together with the test above this shows the key reaches
+/// the policy for *its own* node.
+#[tokio::test]
+async fn a_policy_refusal_names_the_agents_node() -> anyhow::Result<()> {
+    let (fx, agent) = frozen_with_key().await?;
+    let res = agent
+        .call(fx.wallet.id(), "spend")
+        .args_json(json!({ "token": fx.token.id(), "payee": "mallory.testnet", "amount": "1" }))
+        .gas(GAS)
+        .transact()
+        .await?;
+    assert!(res.is_success(), "{res:#?}");
+    let v: serde_json::Value = res.json()?;
+    assert_eq!(v["status"], "refused", "unexpected spend answer: {v}");
+    assert_eq!(v["code"], 4, "unexpected spend answer: {v}");
+    Ok(())
+}
+
+/// The key on chain is exactly what was asked for, on the agent's account: this is the RPC read
+/// the later tasks do. It is the only key the agent account holds.
 #[tokio::test]
 async fn rpc_shows_the_agent_key_is_restricted_to_spend_on_the_wallet() -> anyhow::Result<()> {
     let (fx, agent) = frozen_with_key().await?;
-    let keys = fx.worker.view_access_keys(fx.wallet.id()).await?;
+    let keys = fx.worker.view_access_keys(agent.id()).await?;
     assert_eq!(keys.len(), 1);
     assert_eq!(keys[0].public_key, agent.secret_key().public_key());
     match &keys[0].access_key.permission {
@@ -218,10 +274,12 @@ async fn rpc_shows_the_agent_key_is_restricted_to_spend_on_the_wallet() -> anyho
     Ok(())
 }
 
+/// The headline: after the freeze the wallet holds no key of any kind, so nobody can sign as it.
 #[tokio::test]
-async fn rpc_shows_zero_full_access_keys_after_freeze() -> anyhow::Result<()> {
+async fn rpc_shows_the_wallet_has_no_keys_after_freeze() -> anyhow::Result<()> {
     let (fx, _agent) = frozen_with_key().await?;
     assert_eq!(full_access_key_count(&fx.worker, fx.wallet.id()).await?, 0);
+    assert_eq!(fx.worker.view_access_keys(fx.wallet.id()).await?.len(), 0);
     Ok(())
 }
 

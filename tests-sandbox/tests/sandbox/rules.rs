@@ -453,9 +453,11 @@ async fn register_credential_is_admin_only() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The agent holds a function-call key on the wallet account itself, so its calls arrive
-/// with `predecessor_id == <the wallet>`. Two things must stop it: the key's method
-/// allow-list, and — if that allow-list were ever widened — the admin check.
+/// The agents' keys are on their own accounts, so a real agent's call arrives with the agent as
+/// predecessor. This test uses keys on the wallet instead, which a correct deployment never
+/// has, because that is the caller the admin check has to refuse if the deployment is ever
+/// wrong: first the key's method allow-list, and — if that allow-list were widened — the admin
+/// check.
 #[tokio::test]
 async fn an_agent_function_call_key_cannot_register_a_credential() -> anyhow::Result<()> {
     let fx = deploy_with_token().await?;
@@ -1365,25 +1367,23 @@ async fn an_unpause_assertion_cannot_widen_a_rule() -> anyhow::Result<()> {
 // The exported surface
 // ---------------------------------------------------------------------------------------
 //
-// In this design `#[private]` means much less than it looks like it means. It checks that
-// the predecessor is this account — and the agent's function-call keys live ON this account,
-// so an agent key arrives with exactly that predecessor and sails straight through. Any
-// state-writing method whose only guard is `#[private]` is therefore reachable by an agent
-// key with no admin check and no assertion.
+// `#[private]` only checks that the predecessor is this account. In a correct deployment that
+// keeps everyone out: the agents' keys are on their own accounts and the frozen wallet has no
+// keys. But that is a fact about the deployment, not about this code, and a key on the wallet
+// would pass `#[private]` with no admin check and no assertion. So no state-writing method
+// relies on it alone.
 //
 // `commit_rule` was such a method, and it takes a rule and a `reset_ledger` flag, so it was
-// an unsigned rule change and a budget wipe behind one access-key method list in a deploy
-// script. The fix is for the exported method not to exist.
+// an unsigned rule change and a budget wipe behind the deployment being right. The fix is for
+// the exported method not to exist.
 
-/// The premise the whole guard story rests on: the admin is a **different account** from the
-/// wallet.
+/// The admin is a **different account** from the wallet.
 ///
-/// `assert_admin` compares the predecessor against the stored admin, and the agent's
-/// function-call keys live on the wallet account — so a call made with one arrives with the
-/// predecessor set to the wallet. If the admin were the wallet, every admin check in the
-/// contract would succeed for an agent key: no gate, no passkey, an agent setting its own
-/// rules. Same class of mistake as relying on `#[private]` here, and the last place the
-/// premise could have been broken.
+/// `assert_admin` compares the predecessor against the stored admin. If the admin were the
+/// wallet, every admin check would succeed for anything that signs as the wallet (the
+/// deployer's key before the freeze, or a key added by mistake), and after the freeze for
+/// nobody. A correct deployment never has a key on the wallet for an agent, so this is depth,
+/// but it is the last place a wrong deployment could have gone unnoticed.
 ///
 /// Refused at initialisation, so a deployment cannot be in that state at all.
 #[tokio::test]

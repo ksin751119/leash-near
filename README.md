@@ -2,6 +2,10 @@
 
 A NEAR wallet account that holds money, gives AI agents a key that can only call `spend`, and refuses any payment that breaks a rule the agents cannot reach.
 
+## Accounts and keys
+
+The wallet account holds the money and runs the contract, and once frozen it has **no keys at all**: nobody can sign as it. Each agent (`pay.ops.x`) holds one function-call key **on its own account**, with the wallet as `receiver_id` and `["spend"]` as its only method, and no other key (`scripts/grant-agent-key.sh`). The key is on the agent's account, not the wallet's, because `spend` derives the budget node from `predecessor_id`: a key on the wallet would sign as the wallet and every payment would be refused with code 1. Verified: `tests-sandbox/tests/sandbox/keys.rs`, and on testnet (`.superpowers/sdd/2026-10-25-leash-near/testnet-bringup-report.md`).
+
 ## Passkeys on chain
 
 Tightening a spending rule is free and immediate. Loosening one requires a signature from a registered credential: in the intended flow somebody unlocks their phone with Face ID, a fingerprint or the device PIN, the device signs, and the **contract** checks that signature. No server, no oracle, no bridge.
@@ -34,6 +38,8 @@ The payment path is far cheaper, because no signature is checked on it:
 | --- | --- | --- |
 | allowed | 7.9 TGas | the seven checks, the reservation, `ft_transfer` on the token, and the callback that settles it |
 | refused | 2.7 TGas | the seven checks and one ring-buffer write — no cross-contract call at all |
+
+**What an agent attaches.** Those are gas *burnt*. `spend` also reserves 20 TGas for `ft_transfer` and 15 TGas for the callback before it starts, so the call needs at least about 40 TGas attached; 60 TGas is safe and costs a fraction of the key's 0.25 NEAR allowance. With 30 TGas an allowed payment fails with `Exceeded the prepaid gas` and is rolled back (seen on testnet).
 
 Measured by `a_payment_fits_in_gas` in `tests-sandbox/tests/sandbox/spend.rs`. Neither promise is given the caller's leftover gas (`with_unused_gas_weight(0)`), so the token contract is never handed the ~200 TGas an agent's `max_gas` call has spare. A refused payment is a *successful* transaction: the contract records the decision, emits an event and returns `{"status":"refused","code":4,"reason":"payee is not on the allow-list"}` rather than panicking, because a panic would roll back the record and leave nothing on chain to say why. Each of the seven codes has a test asserting all three things at once — the transaction succeeded, no balance moved, and the recorded decision names the code.
 
