@@ -10,7 +10,7 @@ should show: [`docs/demo-script.md`](docs/demo-script.md).
 
 ## If you click a transaction link: a refusal is a successful transaction
 
-When Leash refuses a payment, the explorer shows a transaction that succeeded: no failed receipt, and a `leash: refused` log carrying the decision. That is correct and deliberate. The links in this project open [near.rocks](https://testnet.near.rocks), which shows every receipt with its logs and needs no browser gate.
+When Leash refuses a payment, the explorer shows a transaction that succeeded: no failed receipt, and a NEP-297 log (`EVENT_JSON:` with `"standard":"leash"` and `"event":"refused"`) carrying the decision. That is correct and deliberate. The links in this project open [near.rocks](https://testnet.near.rocks), which shows every receipt with its logs and needs no browser gate.
 The contract answers a refused `spend` with `{"status":"refused","code":4,"reason":"payee is not
 on the allow-list"}` and returns normally, instead of panicking. A panic makes NEAR roll the whole
 transaction back, including the record of why, and the chain would be left with a failed
@@ -20,18 +20,15 @@ transaction's logs. Each refusal code has a test that asserts all three things a
 transaction succeeded, no balance moved, the recorded decision names the code); they are in the
 table below, under "Payments".
 
-Live examples, from the rehearsal deployment (account ids end in `1106fcff`), on testnet:
+Live examples from the deployment in this repo (account ids end in `11074c4d`), on testnet:
 
-- the wallet: [leash-wal-1106fcff.testnet](https://testnet.near.rocks/account/leash-wal-1106fcff.testnet) (0 access keys, contract deployed)
-- an allowed payment: [8USjMTU…9Whz](https://testnet.near.rocks/tx/8USjMTUSFsLvuCfrVVqcWQE2pyfp2QnusZxN92YE9Whz), log `leash: allowed`, then `ft_transfer` runs on the token
-- a refused payment: [4o9CKTQ…7qEp](https://testnet.near.rocks/tx/4o9CKTQcvQmxfFtCAjoQAseDkb4HV65fom6NH2ZH7qEp), log `leash: refused`, return value `{"status":"refused","code":4,"reason":"payee is not on the allow-list"}`, and no `ft_transfer` receipt
+- the wallet: [leash-wal-11074c4d.testnet](https://testnet.near.rocks/account/leash-wal-11074c4d.testnet) (0 access keys, contract deployed)
+- an allowed payment: [Hxm5Hhv…8rAL](https://testnet.near.rocks/tx/Hxm5Hhv1sHnqcwGkso43C7XLXzLApb3ZN3jJnzsP8rAL), an `EVENT_JSON` log with `"event":"allowed"`, then `ft_transfer` runs on the token, then a second log with `"event":"settled"`
+- a refused payment: [Avw594N…L3de](https://testnet.near.rocks/tx/Avw594NmkuKuBHvUj8xnU9oVeMBrZd3j7f33dddZL3de), an `EVENT_JSON` log with `"event":"refused"`, return value `{"status":"refused","code":4,"reason":"payee is not on the allow-list"}`, and no `ft_transfer` receipt
 
-<!-- NOTE FOR THE AUTHOR: these three links point at the REHEARSAL deployment (1106fcff). Re-point them at the fresh deployment's wallet, one allowed and one refused transaction before submitting, and drop the "rehearsal" sentence above. -->
 
-What the dashboard looks like, captured on the same rehearsal deployment (a refusal beside the shared
-budget bar, then a refusal and an allowed payment from the two agents). These were taken before two
-wording fixes: the wallet-keys sentence now says money leaves by two doors, `spend` and `withdraw`,
-and the footnote now says the explorer shows a transaction with no failed receipt rather than a green tick.
+What the dashboard looks like, captured on the deployment above: the shared budget bar with a
+refusal beside it, then the two agents' cards, one refused and one allowed.
 
 ![A refused payment and the budget bar](docs/screenshot-refusal-and-budget.png)
 ![A refusal and an allowed payment from the two agents](docs/screenshot-refused-and-allowed.png)
@@ -268,13 +265,13 @@ scripts/preflight.sh                   # READY to record, or a list of what is w
 
 `docs/demo-script.md` has the beats, the exact words to type, and what each should show. The
 sentences the agents accept are a closed grammar; the verified ones are in `docs/safe-phrasings.md`.
-`deployments/testnet.json` is not a deployment you can run this against. It is the frozen record of
-the dress-rehearsal deployment (ids ending `044127`): the wallet has no keys, it runs older contract
-code, and both registered credentials are software P-256 keys made for the rehearsal, not a phone's
-passkey. `reset-demo.sh` and `preflight.sh` will fail against it, by design. You can read it, and look
-up its public accounts on near.rocks; you cannot reset, widen or drive it. The recording needs a fresh
-deployment ("Setting up a deployment" in the demo script). The links above point at an earlier
-rehearsal (`1106fcff`), not at this one.
+`deployments/testnet.json` records the live deployment the links above point at (ids ending
+`11074c4d`): the wallet is frozen with no access keys of any kind, credential sequence 0 is a real
+device passkey (Chrome on macOS, Touch ID) and sequence 1 is a software recovery credential
+registered with a signature from the device. It holds public account ids and nothing else, so you
+can read it and look up every account and transaction on near.rocks, but you cannot drive it:
+widening needs that passkey and everything else needs the admin key. To run the demo yourself,
+make your own deployment ("Setting up a deployment" in the demo script).
 
 ## Deliberately not built
 

@@ -135,9 +135,13 @@ async function serve(req, res) {
   }
 }
 
-createServer((req, res) => {
+const server = createServer((req, res) => {
   serve(req, res).catch((e) => send(res, 500, `relay failed: ${e.message}`));
-}).listen(PORT, "127.0.0.1", () => {
-  console.log(`relay on http://localhost:${PORT}/capture-assertion.html`);
+});
+
+// Report the port the OS actually gave us, not the one asked for: port 0 means "any free port",
+// which is how a test gets one without racing another test for a fixed number.
+server.listen(PORT, "127.0.0.1", () => {
+  console.log(`relay on http://localhost:${server.address().port}/capture-assertion.html`);
   console.log(`a capture sent from the page lands at ${TARGET}`);
 });

@@ -1,28 +1,28 @@
 {
   "network": "testnet",
-  "admin": "leash-adm-044127.testnet",
-  "wallet": "wal.leash-adm-044127.testnet",
-  "token": "leash-tok-044127.testnet",
-  "budget_node": "leash-bud-044127.testnet",
+  "admin": "leash-adm-11074c4d.testnet",
+  "wallet": "leash-wal-11074c4d.testnet",
+  "token": "leash-tok-11074c4d.testnet",
+  "budget_node": "leash-bud-11074c4d.testnet",
   "payees": [
-    "pay1.leash-adm-044127.testnet",
-    "leash-pay2-044127.testnet"
+    "leash-pay1-11074c4d.testnet",
+    "leash-pay2-11074c4d.testnet"
   ],
   "agents": {
-    "alpha.leash-bud-044127.testnet": "ed25519:3PLPRh6YDfZBY8sXkeVtvoEjvTKA61f7JVhacEBTrgc2",
-    "beta.leash-bud-044127.testnet": "ed25519:2uFNFkJLfKWhwzWSsq5c9bdV5oQuPNfJcGu3iiQkjeCG"
+    "alpha.leash-bud-11074c4d.testnet": "ed25519:A91fpcnpndjv6A7ESLLgFp4uYdRNszhp8qNwM5EVmtSw",
+    "beta.leash-bud-11074c4d.testnet": "ed25519:J8s1EpAXVXgpq8ciNaGSSjkR4fRyxi7F6P4UZ7HMEkct"
   },
+  "wallet_frozen": true,
   "credentials": [
     {
-      "id": "AjejUStYwZueWcVYAeSBlg==",
-      "kind": "SOFTWARE P-256, dress rehearsal only"
+      "id": "L85dOpcJP2KwB1dKsRt2QwfiQi+4l0xX9Gos9XNEhdGGG7hyzZ6TGmM+RQTncPZTkjLFEphOW2jD",
+      "kind": "DEVICE, Chrome on macOS with Touch ID, registered first (sequence 0)"
     },
     {
-      "id": "ebUZ2VmuWUko1xD4CiNfVg==",
-      "kind": "SOFTWARE P-256, dress rehearsal only (second)"
+      "id": "yQL/I9pQ0OJXJQyC62LOyQ==",
+      "kind": "SOFTWARE P-256 recovery credential, registered second with a signature from the device"
     }
   ],
-  "wallet_frozen": true,
-  "notes": "REHEARSAL ARTIFACT, frozen, older contract code, software credentials; cannot be reset or driven. public data only; private keys are in ~/.leash-testnet and ~/.near-credentials",
-  "funded_wallet_balance": "500000000"
+  "funded_wallet_balance": 500000000,
+  "notes": "live demo deployment; the wallet is frozen (no access keys of any kind), the first credential is a real device passkey (Chrome on macOS, Touch ID). public data only; private keys are in ~/.leash-testnet and ~/.near-credentials"
 }

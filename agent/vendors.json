@@ -6,7 +6,7 @@
       "acme",
       "pay1"
     ],
-    "account": "pay1.leash-adm-044127.testnet"
+    "account": "leash-pay1-11074c4d.testnet"
   },
   {
     "id": "pay2",
@@ -16,6 +16,6 @@
       "api",
       "pay2"
     ],
-    "account": "leash-pay2-044127.testnet"
+    "account": "leash-pay2-11074c4d.testnet"
   }
 ]

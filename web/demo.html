@@ -242,7 +242,7 @@ body { margin:0; background:var(--ground); color:var(--ink); font-family:var(--s
           <div id="strangers"><div class="empty">no stranger has called spend</div></div>
         </div>
         <div class="foot">
-          <b>Every refusal is a successful transaction.</b> The contract returns the refusal instead of reverting, so the explorer shows a transaction with no failed receipt, and a <code>leash: refused</code> log, beside a payment that did not happen. A revert would roll the record back and leave no reason on-chain. Reasons are the contract's own words. Anyone can call <code>spend</code>; strangers get their own small ring so they cannot push out the agents' evidence.
+          <b>Every refusal is a successful transaction.</b> The contract returns the refusal instead of reverting, so the explorer shows a transaction with no failed receipt, and an <code>EVENT_JSON</code> log with <code>"event":"refused"</code>, beside a payment that did not happen. A revert would roll the record back and leave no reason on-chain. Reasons are the contract's own words. Anyone can call <code>spend</code>; strangers get their own small ring so they cannot push out the agents' evidence.
         </div>
       </section>
     </div>

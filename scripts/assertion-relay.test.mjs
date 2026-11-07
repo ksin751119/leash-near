@@ -17,15 +17,12 @@ const REPO = resolve(import.meta.dirname, "..");
 const RELAY = join(REPO, "tools", "assertion-relay.mjs");
 const CAPTURE = join(REPO, "tests-sandbox", "tests", "fixtures", "assertion_real_device.json");
 
-/// A port high enough to be free and derived from the test, so two tests never collide.
-let nextPort = 8820;
-
-/// Start a relay and wait for it to say it is listening. Returns the child, its directory and a
-/// `url`, and kills the child when the test ends.
+/// Start a relay on a port the OS picks and wait for it to say which one. Asking for a fixed
+/// port made this file fail only when the whole suite ran, because `node --test` runs files in
+/// parallel and something else had taken the number.
 async function relay(t, { stem = "bud.test", dir } = {}) {
-  const port = nextPort++;
   const where = dir ?? (await mkdtemp(join(tmpdir(), "relay-")));
-  const child = spawn("node", [RELAY, where, stem, String(port)], { cwd: REPO });
+  const child = spawn("node", [RELAY, where, stem, "0"], { cwd: REPO });
   t.after(() => child.kill());
 
   let out = "";
@@ -33,7 +30,8 @@ async function relay(t, { stem = "bud.test", dir } = {}) {
     out += chunk;
     if (out.includes("relay on")) break;
   }
-  assert.match(out, /relay on/, "the relay should say where it is listening");
+  const port = out.match(/relay on http:\/\/localhost:(\d+)\//)?.[1];
+  assert.ok(port, `the relay should say which port it took, said: ${out}`);
   return { dir: where, url: `http://127.0.0.1:${port}`, target: join(where, `${stem}.json`), child };
 }
 
@@ -112,7 +110,7 @@ test("the page is served, and nothing above tools/ is", async (t) => {
 });
 
 test("a filename the relay will not write stops it at startup", async (t) => {
-  const child = spawn("node", [RELAY, tmpdir(), "../escape", "8899"], { cwd: REPO });
+  const child = spawn("node", [RELAY, tmpdir(), "../escape", "0"], { cwd: REPO });
   t.after(() => child.kill());
 
   let err = "";
@@ -128,8 +126,7 @@ test("with no filename given it takes the budget node from the deployment", asyn
   const deployment = join(dir, "deployment.json");
   await writeFile(deployment, JSON.stringify({ budget_node: "bud.leash.testnet" }));
 
-  const port = nextPort++;
-  const child = spawn("node", [RELAY, dir, "", String(port)], {
+  const child = spawn("node", [RELAY, dir, "", "0"], {
     cwd: REPO,
     env: { ...process.env, LEASH_DEPLOYMENT: deployment },
   });

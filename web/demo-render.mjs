@@ -9,7 +9,8 @@
 
 // near.rocks, not explorer.testnet.near.org (a chooser page with no transaction on it) and not
 // nearblocks (Cloudflare-gated against headless browsers, so an AI judge cannot open it). near.rocks
-// renders without a gate and shows every receipt with its logs: "leash: allowed" or "leash: refused"
+// renders without a gate and shows every receipt with its logs: an EVENT_JSON line whose
+// `standard` is "leash" and whose `event` is "allowed", "settled" or "refused"
 // and the returned decision. It shows no green tick; it shows no failure.
 export const EXPLORER = "https://testnet.near.rocks";
 export const txUrl = (hash) => `${EXPLORER}/tx/${hash}`;
@@ -88,7 +89,7 @@ export function renderAction(a, reasons) {
         reason: a.reason ?? sentenceFor(a.code, reasons),
         note: "No money moved.",
         txNote: a.tx
-          ? "This transaction SUCCEEDED, and that is the point. No receipt failed, and its log reads \"leash: refused\" with the reason. The contract returns the refusal instead of reverting, so the decision stays on the chain. A reverted transaction would have left no record at all."
+          ? "This transaction SUCCEEDED, and that is the point. No receipt failed, and it logs an EVENT_JSON line, standard \"leash\", event \"refused\", carrying the reason. The contract returns the refusal instead of reverting, so the decision stays on the chain. A reverted transaction would have left no record at all."
           : null };
     case "failed":
       return { ...base, tone: "failed", label: "FAILED", moved: false,

@@ -43,7 +43,7 @@ agent ──spend(token, payee, amount)──▶ wallet
 A refusal is a **successful transaction** that records the decision and returns it. If the
 contract panicked, NEAR would roll the transaction back, including the record of why, and the
 chain would hold a failed transaction and no explanation. So an explorer shows a transaction with no failed receipt, and a
-`leash: refused` log, next to a payment that did not happen; the page says so beside every refusal. The same applies to the
+`EVENT_JSON` log with `"event":"refused"`, next to a payment that did not happen; the page says so beside every refusal. The same applies to the
 allowed path in a different way: NEAR rolls back per receipt, not per transaction, so a
 transaction-level failure after `ft_transfer` ran does not mean no money moved, and the agent
 never says it does without reading the receipts.
