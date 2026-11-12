@@ -330,7 +330,8 @@ mod tests {
     const UV_CLEAR: &str = include_str!("../../tests-sandbox/tests/fixtures/assertion_uv_clear.json");
     const WRONG_CHALLENGE: &str =
         include_str!("../../tests-sandbox/tests/fixtures/assertion_wrong_challenge.json");
-    /// A capture from a real platform authenticator (Chrome on macOS, Touch ID), taken with
+    /// A capture from a real browser and a real authenticator (Chrome on macOS, a passkey held
+    /// in 1Password), taken with
     /// `tools/capture-assertion.html` and dropped in unedited. The other three fixtures are
     /// minted by a script, so without this one nothing proves the verifier accepts the
     /// encoding a browser actually produces — 37-byte `authenticatorData`, flags `0x1d`

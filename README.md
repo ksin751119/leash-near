@@ -266,9 +266,13 @@ scripts/preflight.sh                   # READY to record, or a list of what is w
 `docs/demo-script.md` has the beats, the exact words to type, and what each should show. The
 sentences the agents accept are a closed grammar; the verified ones are in `docs/safe-phrasings.md`.
 `deployments/testnet.json` records the live deployment the links above point at (ids ending
-`11074c4d`): the wallet is frozen with no access keys of any kind, credential sequence 0 is a real
-device passkey (Chrome on macOS, Touch ID) and sequence 1 is a software recovery credential
-registered with a signature from the device. It holds public account ids and nothing else, so you
+`11074c4d`): the wallet is frozen with no access keys of any kind, credential sequence 0 is a passkey held
+by the author in a password manager (Chrome on macOS, 1Password) and sequence 1 is a software
+recovery credential registered with a signature from it. The label stored on chain for
+sequence 0 says "Touch ID"; that was written before the capture showed otherwise, and it is wrong.
+It cannot be corrected without re-registering, which would move the credential off sequence 0
+and break the one property that matters: that the first credential is the only one the admin key
+could add alone. It holds public account ids and nothing else, so you
 can read it and look up every account and transaction on near.rocks, but you cannot drive it:
 widening needs that passkey and everything else needs the admin key. To run the demo yourself,
 make your own deployment ("Setting up a deployment" in the demo script).
