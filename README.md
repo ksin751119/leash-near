@@ -284,6 +284,13 @@ step and was left out because it adds MPC latency and failure modes to a live de
 policy-composition system (one rule type carries the thesis), multi-token budgets, an indexer, a
 mainnet deployment, and agent-to-agent negotiation.
 
+There is also no owner-facing UI. The dashboard is the agent's side of the system: an instruction goes
+in as a sentence, the contract decides, and an allowed payment and a refused one come back to the same
+place looking the same, which is the point. Changing a rule is the owner's side and runs through `near`
+on the command line; `web/demo.html` renders the rule in force but carries no control that sets it. A
+button would also hide what the owner most needs to see: the challenge the contract issued, the fields
+of the assertion that answers it, and the gas the P-256 check costs.
+
 ## What NEAR provides, and what this adds
 
 Leash is built out of NEAR account primitives rather than around them:
