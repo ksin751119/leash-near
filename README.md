@@ -283,3 +283,51 @@ Cross-chain settlement through Chain Signatures (money on Ethereum, rules on NEA
 step and was left out because it adds MPC latency and failure modes to a live demo. Also not built: a
 policy-composition system (one rule type carries the thesis), multi-token budgets, an indexer, a
 mainnet deployment, and agent-to-agent negotiation.
+
+## What NEAR provides, and what this adds
+
+Leash is built out of NEAR account primitives rather than around them:
+
+- **Function-call access keys.** The restriction an agent key carries (`receiver_id` the wallet,
+  `method_names` `["spend"]`, no attached deposit) is enforced by the protocol, before the
+  contract runs. The gap Leash closes is that a key's `allowance` meters gas, not value.
+- **Deleting every access key.** Freezing the wallet is `DeleteKey` on the last full-access key.
+  After it the account cannot be signed for by anyone and its code cannot change.
+- **Subaccount naming as authorisation.** Only `n.testnet` can create `alpha.n.testnet`, so
+  `node_of(predecessor)` binds an agent to a budget with no registry and no admin step.
+- **NEP-141** for the token, including the 1 yoctoNEAR assertion and `storage_deposit`.
+- **NEP-297** events for every decision, which is what the explorer and the dashboard read.
+- **Promise callbacks** for reserve-then-settle, and free **view calls** for the ring buffers the
+  dashboard reads, so the project needs no indexer.
+
+P-256 is the one thing NEAR does not provide: there are host functions for ed25519 and secp256k1
+but not secp256r1, which is the curve WebAuthn signs with, so the verification runs inside the
+wasm at 33.46 TGas.
+
+## How this was built
+
+**All of it is new.** The repository was created for this hackathon; the first commit is
+2026-11-05 and the whole history is in `main`. There is no pre-hackathon baseline to diff
+against.
+
+**AI-generated code, disclosed in full.** Essentially all of the code, tests and documentation in
+this repository were written by Claude Opus 5 driving Claude Code, working from a spec and plan in
+`docs/superpowers/` that were themselves produced in the same session. Every commit carries a
+`Co-Authored-By: Claude Opus 5` trailer and a link to the session. The human author set the
+design constraints (pure NEAR, no cross-chain, a human-presence gate rather than a timelock),
+ruled on the trade-offs, registered the passkey on real hardware, and recorded the demo. Treat
+the test suite, not the prose, as the evidence: see "What is claimed, and the test that proves
+it" above.
+
+**Carried over from an earlier project.** The dashboard's visual language — palette, card layout,
+the idea of showing a refusal as a first-class outcome — follows [an earlier project of mine built
+on Ethereum](https://github.com/ksin751119/leash). The code was rewritten for this one: of the 516
+distinct lines in `web/demo.html`, 53 also appear in the older file, almost all of them CSS custom
+properties. No contract, agent or script code is shared; the chains have nothing in common.
+
+**Dependencies, in full.** The contract depends on `near-sdk 5`, `p256 0.13` (`default-features =
+false`, `ecdsa` only) and `sha2 0.10`. The sandbox tests add `near-workspaces 0.24`, `tokio`,
+`anyhow`, `serde_json` and a vendored `openssl`. The agent and the dashboard have **no npm
+dependencies at all** — no `package.json`, no lockfile, no framework: plain Node 24 and browser ES
+modules, with `fetch` against the JSON-RPC endpoint. Nothing was generated from a template or a
+starter kit.
