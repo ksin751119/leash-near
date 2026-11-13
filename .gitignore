@@ -6,3 +6,6 @@ node_modules/
 agent/.sent-*.json
 agent/.sent-*.json.tmp
 .assertions/
+
+# rendered demo video (lives on YouTube, not in git)
+video/
