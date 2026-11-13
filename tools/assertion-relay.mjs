@@ -135,6 +135,17 @@ async function serve(req, res) {
   }
 }
 
+// Losing stdout must not take the relay with it. `console.log` on a pipe whose reader has gone
+// raises EPIPE, and an unhandled 'error' on process.stdout ends the process -- so closing the
+// terminal the relay was started from would kill it silently, at the one moment in a recording
+// when a retake costs a face scan and a refilled budget. Keep serving; the log line is the
+// only thing lost.
+for (const stream of [process.stdout, process.stderr]) {
+  stream.on("error", (e) => {
+    if (e.code !== "EPIPE") throw e;
+  });
+}
+
 const server = createServer((req, res) => {
   serve(req, res).catch((e) => send(res, 500, `relay failed: ${e.message}`));
 });

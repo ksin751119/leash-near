@@ -12,6 +12,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { once } from "node:events";
+import http from "node:http";
 
 const REPO = resolve(import.meta.dirname, "..");
 const RELAY = join(REPO, "tools", "assertion-relay.mjs");
@@ -25,23 +26,65 @@ async function relay(t, { stem = "bud.test", dir } = {}) {
   const child = spawn("node", [RELAY, where, stem, "0"], { cwd: REPO });
   t.after(() => child.kill());
 
+  // Read the banner with a listener, and keep draining afterwards. Breaking out of a
+  // `for await` over child.stdout destroys the pipe, and the relay's next log line then
+  // raises EPIPE in the child -- which is a thing the relay now survives, but a test should
+  // not quietly impose on it either.
   let out = "";
-  for await (const chunk of child.stdout) {
-    out += chunk;
-    if (out.includes("relay on")) break;
-  }
+  await new Promise((done, fail) => {
+    const onChunk = (chunk) => {
+      out += chunk;
+      if (out.includes("relay on")) {
+        child.stdout.off("data", onChunk);
+        child.stdout.resume();
+        done();
+      }
+    };
+    child.stdout.on("data", onChunk);
+    child.once("exit", (code) => fail(new Error(`the relay exited with ${code}: ${out}`)));
+  });
   const port = out.match(/relay on http:\/\/localhost:(\d+)\//)?.[1];
   assert.ok(port, `the relay should say which port it took, said: ${out}`);
   return { dir: where, url: `http://127.0.0.1:${port}`, target: join(where, `${stem}.json`), child };
 }
 
+/// Every request here opens its own connection (`agent: false`). Node's `fetch` pools sockets
+/// per host:port, and a pooled socket raced the relay's own close often enough to fail this
+/// file about one run in eight -- always on the one test that sends two requests to the same
+/// relay. The relay is not at fault: the same two requests through `curl`, which does not
+/// pool, never failed in 30 runs. A flaky test in the suite a judge runs is worse than none.
+function request(url, { method = "GET", body, headers = {} } = {}) {
+  const u = new URL(url);
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        hostname: u.hostname,
+        port: u.port,
+        path: `${u.pathname}${u.search}`,
+        method,
+        headers,
+        agent: false,
+      },
+      (res) => {
+        const chunks = [];
+        res.on("data", (c) => chunks.push(c));
+        res.on("end", () =>
+          resolve({ status: res.statusCode, text: Buffer.concat(chunks).toString("utf8") }),
+        );
+      },
+    );
+    req.on("error", reject);
+    if (body !== undefined) req.write(body);
+    req.end();
+  });
+}
+
 async function post(url, body) {
-  const res = await fetch(`${url}/save`, {
+  return request(`${url}/save`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: typeof body === "string" ? body : JSON.stringify(body),
   });
-  return { status: res.status, text: await res.text() };
 }
 
 test("a capture from the page lands where the script is waiting", async (t) => {
@@ -99,12 +142,12 @@ test("a second capture replaces the first, because a nonce is spent once", async
 test("the page is served, and nothing above tools/ is", async (t) => {
   const r = await relay(t);
 
-  const page = await fetch(`${r.url}/capture-assertion.html`);
+  const page = await request(`${r.url}/capture-assertion.html`);
   assert.equal(page.status, 200);
-  assert.match(await page.text(), /Leash passkey capture/);
+  assert.match(page.text, /Leash passkey capture/);
 
   for (const path of ["/../deployments/testnet.json", "/../../etc/passwd", "/..%2fCargo.toml"]) {
-    const res = await fetch(`${r.url}${path}`);
+    const res = await request(`${r.url}${path}`);
     assert.equal(res.status, 404, `${path} should not be served`);
   }
 });
@@ -138,4 +181,26 @@ test("with no filename given it takes the budget node from the deployment", asyn
     if (out.includes("lands at")) break;
   }
   assert.match(out, /bud\.leash\.testnet\.json/, "the node comes from the deployment file");
+});
+
+// The relay is started from a terminal during a recording. If that terminal goes away, its
+// next `console.log` raises EPIPE, and an unhandled error on process.stdout ends the process
+// -- the relay would be gone at the one moment a retake costs a face scan and a refilled
+// budget. One write after the pipe closes is a race; a short run of them is not. Without the
+// guard in the relay this test killed it on every one of ten tries.
+test("losing stdout does not kill the relay", async (t) => {
+  const r = await relay(t);
+  const capture = JSON.parse(await readFile(CAPTURE, "utf8"));
+
+  r.child.stdout.destroy();
+
+  // save() logs before it answers, so every one of these would write to the broken pipe.
+  for (let i = 0; i < 12; i++) {
+    const res = await post(r.url, { ...capture, challenge: `Y2hhbGxlbmdlJHtpfQ==` });
+    assert.equal(res.status, 200, `still answering on request ${i + 1} with no stdout`);
+  }
+  assert.equal(r.child.exitCode, null, "the process did not exit");
+
+  const written = JSON.parse(await readFile(r.target, "utf8"));
+  assert.equal(written.credential_id, capture.credential_id, "and it is still writing captures");
 });
