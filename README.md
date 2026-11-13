@@ -8,6 +8,10 @@ from a registered passkey, verified by the contract itself: no server, no oracle
 How the pieces fit: [`docs/architecture.md`](docs/architecture.md). What to type and what it
 should show: [`docs/demo-script.md`](docs/demo-script.md).
 
+A walkthrough of the deployment below, recorded against testnet, with chapters:
+[youtu.be/7FLWybIWORc](https://youtu.be/7FLWybIWORc). Every transaction in it is real; the only
+part not recorded on the server is the passkey signature, which happens on the owner's laptop.
+
 ## If you click a transaction link: a refusal is a successful transaction
 
 When Leash refuses a payment, the explorer shows a transaction that succeeded: no failed receipt, and a NEP-297 log (`EVENT_JSON:` with `"standard":"leash"` and `"event":"refused"`) carrying the decision. That is correct and deliberate. The links in this project open [near.rocks](https://testnet.near.rocks), which shows every receipt with its logs and needs no browser gate.
